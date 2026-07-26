@@ -7,13 +7,12 @@
 namespace device_config {
 namespace {
 constexpr char CONFIG_NS[] = "device_cfg";
-constexpr char LEGACY_SERVER_UDP_HOST[] = "ptt.4l2.cn";
-constexpr uint16_t LEGACY_SERVER_UDP_PORT = 60050;
 constexpr char LEGACY_SERVER_HTTP_API_BASE_URL[] = "https://ptt.4l2.cn";
-constexpr char DEFAULT_SERVER_UDP_HOST[] = "ptt.4l2.cn";
-constexpr uint16_t DEFAULT_SERVER_UDP_PORT = 60050;
 constexpr char DEFAULT_SERVER_HTTP_API_BASE_URL[] = "https://ptt.4l2.cn";
-constexpr uint16_t SERVER_DEFAULT_REVISION = 1;
+// UDP 入口不再由用户配置，改由 access_point_discovery 通过 HTTP 接口发现。
+constexpr char LEGACY_UDP_HOST_KEY[] = "svr_udp_h";
+constexpr char LEGACY_UDP_PORT_KEY[] = "svr_udp_p";
+constexpr uint16_t SERVER_DEFAULT_REVISION = 2;
 constexpr char SERVER_DEFAULT_REVISION_KEY[] = "svr_def_rev";
 constexpr char BACKLIGHT_KEY[] = "ui_bl";
 constexpr char AUTO_START_KEY[] = "ui_ast";
@@ -89,11 +88,18 @@ void sanitize_radio_config(RadioConfig &config) {
     if (config.rf_guard_max_tx_in_window_s > config.rf_guard_window_s) {
         config.rf_guard_max_tx_in_window_s = config.rf_guard_window_s;
     }
+
+    config.adc_gain_db = normalize_adc_gain_db(config.adc_gain_db);
+    if (config.adc_volume > AUDIO_VOLUME_MAX) {
+        config.adc_volume = ADC_VOLUME_DEFAULT;
+    }
+    if (config.dac_volume > AUDIO_VOLUME_MAX) {
+        config.dac_volume = DAC_VOLUME_DEFAULT;
+    }
 }
 
 void sanitize_server_config(ServerConfig &config) {
     config.callsign[CALLSIGN_MAX_LEN] = '\0';
-    config.udp_host[HOST_MAX_LEN] = '\0';
     config.http_api_base_url[URL_MAX_LEN] = '\0';
     config.account[ACCOUNT_MAX_LEN] = '\0';
     config.device_auth_password[PASSWORD_MAX_LEN] = '\0';
@@ -105,12 +111,6 @@ void sanitize_server_config(ServerConfig &config) {
         config.dmr_id = 0;
     }
 
-    if (config.udp_host[0] == '\0') {
-        copy_cstr(config.udp_host, DEFAULT_SERVER_UDP_HOST);
-    }
-    if (config.udp_port == 0) {
-        config.udp_port = DEFAULT_SERVER_UDP_PORT;
-    }
     if (config.http_api_base_url[0] == '\0') {
         copy_cstr(config.http_api_base_url, DEFAULT_SERVER_HTTP_API_BASE_URL);
     }
@@ -171,6 +171,11 @@ void load_radio_config(Preferences &prefs, RadioConfig &config) {
     config.rf_guard_single_tx_limit_s = prefs.getUShort("radio_rfg_stx", config.rf_guard_single_tx_limit_s);
     config.rf_guard_window_s = prefs.getUShort("radio_rfg_win", config.rf_guard_window_s);
     config.rf_guard_max_tx_in_window_s = prefs.getUShort("radio_rfg_max", config.rf_guard_max_tx_in_window_s);
+    config.adc_gain_db = prefs.getUChar("radio_adc_g", config.adc_gain_db);
+    config.adc_volume = prefs.getUChar("radio_adc_v", config.adc_volume);
+    config.dac_volume = prefs.getUChar("radio_dac_v", config.dac_volume);
+    config.sql_active_high = prefs.getBool("radio_sql_hi", config.sql_active_high);
+    config.ptt_active_high = prefs.getBool("radio_ptt_hi", config.ptt_active_high);
     sanitize_radio_config(config);
 }
 
@@ -179,8 +184,6 @@ void load_server_config(Preferences &prefs, ServerConfig &config) {
     load_optional_string(prefs, "svr_call", config.callsign, sizeof(config.callsign));
     config.node_ssid = prefs.getUChar("svr_ssid", 0);
     config.dmr_id = prefs.getULong("svr_dmr", 0);
-    load_optional_string(prefs, "svr_udp_h", config.udp_host, sizeof(config.udp_host));
-    config.udp_port = prefs.getUShort("svr_udp_p", 0);
     load_optional_string(prefs, "svr_http", config.http_api_base_url, sizeof(config.http_api_base_url));
     load_optional_string(prefs, "svr_acc", config.account, sizeof(config.account));
     load_optional_string(prefs, "svr_pwd", config.device_auth_password, sizeof(config.device_auth_password));
@@ -188,17 +191,13 @@ void load_server_config(Preferences &prefs, ServerConfig &config) {
 }
 
 bool server_defaults_changed() {
-    return strcmp(DEFAULT_SERVER_UDP_HOST, LEGACY_SERVER_UDP_HOST) != 0 ||
-           DEFAULT_SERVER_UDP_PORT != LEGACY_SERVER_UDP_PORT ||
-           strcmp(DEFAULT_SERVER_HTTP_API_BASE_URL, LEGACY_SERVER_HTTP_API_BASE_URL) != 0;
+    return strcmp(DEFAULT_SERVER_HTTP_API_BASE_URL, LEGACY_SERVER_HTTP_API_BASE_URL) != 0;
 }
 
 bool persist_server_config(Preferences &prefs, const ServerConfig &config) {
     prefs.putString("svr_call", config.callsign);
     prefs.putUChar("svr_ssid", config.node_ssid);
     prefs.putULong("svr_dmr", config.dmr_id);
-    prefs.putString("svr_udp_h", config.udp_host);
-    prefs.putUShort("svr_udp_p", config.udp_port);
     prefs.putString("svr_http", config.http_api_base_url);
     prefs.putString("svr_acc", config.account);
     prefs.putString("svr_pwd", config.device_auth_password);
@@ -207,10 +206,6 @@ bool persist_server_config(Preferences &prefs, const ServerConfig &config) {
 }
 
 bool migrate_legacy_server_defaults(ServerConfig &config) {
-    if (!server_defaults_changed()) {
-        return false;
-    }
-
     Preferences prefs;
     if (!prefs.begin(CONFIG_NS, false)) {
         return false;
@@ -222,19 +217,13 @@ bool migrate_legacy_server_defaults(ServerConfig &config) {
         return false;
     }
 
+    // 修订 2：UDP 入口改为服务端发现，清掉旧的手工配置键。
+    prefs.remove(LEGACY_UDP_HOST_KEY);
+    prefs.remove(LEGACY_UDP_PORT_KEY);
+
     bool changed = false;
-
-    if (strcmp(config.udp_host, LEGACY_SERVER_UDP_HOST) == 0) {
-        copy_cstr(config.udp_host, DEFAULT_SERVER_UDP_HOST);
-        changed = true;
-    }
-
-    if (config.udp_port == LEGACY_SERVER_UDP_PORT) {
-        config.udp_port = DEFAULT_SERVER_UDP_PORT;
-        changed = true;
-    }
-
-    if (strcmp(config.http_api_base_url, LEGACY_SERVER_HTTP_API_BASE_URL) == 0) {
+    if (server_defaults_changed() &&
+        strcmp(config.http_api_base_url, LEGACY_SERVER_HTTP_API_BASE_URL) == 0) {
         copy_cstr(config.http_api_base_url, DEFAULT_SERVER_HTTP_API_BASE_URL);
         changed = true;
     }
@@ -277,14 +266,17 @@ void set_defaults(RadioConfig &config) {
     config.rf_guard_single_tx_limit_s = RF_GUARD_SINGLE_TX_LIMIT_DEFAULT_S;
     config.rf_guard_window_s = RF_GUARD_WINDOW_DEFAULT_S;
     config.rf_guard_max_tx_in_window_s = RF_GUARD_MAX_TX_IN_WINDOW_DEFAULT_S;
+    config.adc_gain_db = ADC_GAIN_DEFAULT_DB;
+    config.adc_volume = ADC_VOLUME_DEFAULT;
+    config.dac_volume = DAC_VOLUME_DEFAULT;
+    config.sql_active_high = SQL_ACTIVE_HIGH_DEFAULT;
+    config.ptt_active_high = PTT_ACTIVE_HIGH_DEFAULT;
 }
 
 void set_defaults(ServerConfig &config) {
     memset(&config, 0, sizeof(config));
     config.node_ssid = 0;
     config.dmr_id = 0;
-    copy_cstr(config.udp_host, DEFAULT_SERVER_UDP_HOST);
-    config.udp_port = DEFAULT_SERVER_UDP_PORT;
     copy_cstr(config.http_api_base_url, DEFAULT_SERVER_HTTP_API_BASE_URL);
 }
 
@@ -336,6 +328,17 @@ bool is_default_or_legacy_server_http_api_base(const char *base_url) {
            strcmp(base_url, LEGACY_SERVER_HTTP_API_BASE_URL) == 0;
 }
 
+uint8_t normalize_adc_gain_db(uint8_t gain_db) {
+    if (gain_db > ADC_GAIN_MAX_DB) {
+        return ADC_GAIN_DEFAULT_DB;
+    }
+
+    const uint8_t step = static_cast<uint8_t>(
+        (gain_db + (ADC_GAIN_STEP_DB / 2U)) / ADC_GAIN_STEP_DB
+    );
+    return static_cast<uint8_t>(step * ADC_GAIN_STEP_DB);
+}
+
 bool save(const DeviceConfig &config) {
     Preferences prefs;
     if (!prefs.begin(CONFIG_NS, false)) {
@@ -364,12 +367,15 @@ bool save(const DeviceConfig &config) {
     prefs.putUShort("radio_rfg_stx", config.radio.rf_guard_single_tx_limit_s);
     prefs.putUShort("radio_rfg_win", config.radio.rf_guard_window_s);
     prefs.putUShort("radio_rfg_max", config.radio.rf_guard_max_tx_in_window_s);
+    prefs.putUChar("radio_adc_g", config.radio.adc_gain_db);
+    prefs.putUChar("radio_adc_v", config.radio.adc_volume);
+    prefs.putUChar("radio_dac_v", config.radio.dac_volume);
+    prefs.putBool("radio_sql_hi", config.radio.sql_active_high);
+    prefs.putBool("radio_ptt_hi", config.radio.ptt_active_high);
 
     prefs.putString("svr_call", config.server.callsign);
     prefs.putUChar("svr_ssid", config.server.node_ssid);
     prefs.putULong("svr_dmr", config.server.dmr_id);
-    prefs.putString("svr_udp_h", config.server.udp_host);
-    prefs.putUShort("svr_udp_p", config.server.udp_port);
     prefs.putString("svr_http", config.server.http_api_base_url);
     prefs.putString("svr_acc", config.server.account);
     prefs.putString("svr_pwd", config.server.device_auth_password);

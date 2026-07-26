@@ -1,24 +1,10 @@
 #include "i2s_driver.h"
 #include "../config.h"
-#include <driver/gpio.h>
 #include <string.h>
 #include <stdlib.h>
 
 static uint8_t current_volume = 100;
 static bool is_muted = false;
-
-static void apply_i2s_gpio_drive(void) {
-    const gpio_num_t output_pins[] = {
-        static_cast<gpio_num_t>(I2S_MCLK),
-        static_cast<gpio_num_t>(I2S_BCLK),
-        static_cast<gpio_num_t>(I2S_WS),
-        static_cast<gpio_num_t>(I2S_DOUT),
-    };
-
-    for (gpio_num_t pin : output_pins) {
-        gpio_set_drive_capability(pin, GPIO_DRIVE_CAP_2);
-    }
-}
 
 bool i2s_driver_init(void) {
     i2s_config_t i2s_config = {
@@ -32,7 +18,7 @@ bool i2s_driver_init(void) {
         .dma_buf_len = I2S_DMA_BUF_LEN,
         .use_apll = true,
         .tx_desc_auto_clear = true,
-        .fixed_mclk = static_cast<int>(I2S_MCLK_HZ),
+        .fixed_mclk = static_cast<int>(I2S_SAMPLE_RATE * 256U),
     };
 
     i2s_pin_config_t pin_config = {
@@ -53,7 +39,6 @@ bool i2s_driver_init(void) {
         i2s_driver_uninstall(I2S_PORT_NUM);
         return false;
     }
-    apply_i2s_gpio_drive();
 
     ret = i2s_set_clk(I2S_PORT_NUM, I2S_SAMPLE_RATE, 16, I2S_CHANNEL_STEREO);
     if (ret != ESP_OK) {
@@ -82,19 +67,39 @@ bool i2s_write(const void *data, size_t len, size_t *bytes_written) {
         return true;
     }
 
-    // 应用软件音量
+    // 应用软件音量。分块缩放到栈上的固定缓冲，避免在音频路径上做堆分配
+    // （原实现每帧 malloc/free 一次，既有碎片风险也可能在分配失败时静默跳过缩放）。
     if (current_volume < 100) {
-        int16_t *samples = (int16_t *)malloc(len);
-        if (samples) {
-            memcpy(samples, data, len);
-            float scale = current_volume / 100.0f;
-            for (size_t i = 0; i < len / 2; i++) {
-                samples[i] = (int16_t)(samples[i] * scale);
+        static constexpr size_t CHUNK_SAMPLES = 256;
+        int16_t chunk[CHUNK_SAMPLES];
+
+        const int16_t *source = (const int16_t *)data;
+        const size_t total_samples = len / sizeof(int16_t);
+        const float scale = current_volume / 100.0f;
+        size_t done_samples = 0;
+
+        *bytes_written = 0;
+        while (done_samples < total_samples) {
+            const size_t batch = (total_samples - done_samples) < CHUNK_SAMPLES
+                                     ? (total_samples - done_samples)
+                                     : CHUNK_SAMPLES;
+            for (size_t i = 0; i < batch; i++) {
+                chunk[i] = (int16_t)(source[done_samples + i] * scale);
             }
-            esp_err_t ret = ::i2s_write(I2S_PORT_NUM, samples, len, bytes_written, portMAX_DELAY);
-            free(samples);
-            return ret == ESP_OK;
+
+            size_t chunk_written = 0;
+            esp_err_t ret = ::i2s_write(I2S_PORT_NUM,
+                                        chunk,
+                                        batch * sizeof(int16_t),
+                                        &chunk_written,
+                                        portMAX_DELAY);
+            *bytes_written += chunk_written;
+            if (ret != ESP_OK) {
+                return false;
+            }
+            done_samples += batch;
         }
+        return true;
     }
 
     esp_err_t ret = ::i2s_write(I2S_PORT_NUM, data, len, bytes_written, portMAX_DELAY);
@@ -102,17 +107,24 @@ bool i2s_write(const void *data, size_t len, size_t *bytes_written) {
 }
 
 bool i2s_read(void *data, size_t len, size_t *bytes_read) {
+    return i2s_read_timeout(data, len, bytes_read, portMAX_DELAY);
+}
+
+bool i2s_read_timeout(void *data, size_t len, size_t *bytes_read, uint32_t ticks_to_wait) {
     size_t local_bytes_read = 0;
     if (!bytes_read) {
         bytes_read = &local_bytes_read;
     }
-    esp_err_t ret = ::i2s_read(I2S_PORT_NUM, data, len, bytes_read, portMAX_DELAY);
+    *bytes_read = 0;
+    if (!data || len == 0) {
+        return false;
+    }
+    esp_err_t ret = ::i2s_read(I2S_PORT_NUM, data, len, bytes_read, ticks_to_wait);
     return ret == ESP_OK;
 }
 
 void i2s_set_sample_rate(uint32_t rate) {
     i2s_set_clk(I2S_PORT_NUM, rate, 16, I2S_CHANNEL_STEREO);
-    apply_i2s_gpio_drive();
 }
 
 void i2s_set_volume(uint8_t volume) {
@@ -126,7 +138,4 @@ uint8_t i2s_get_volume(void) {
 
 void i2s_set_mute(bool mute) {
     is_muted = mute;
-    if (mute) {
-        i2s_zero_dma_buffer(I2S_PORT_NUM);
-    }
 }

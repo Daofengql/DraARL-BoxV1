@@ -22,7 +22,8 @@
 namespace {
 constexpr uint32_t WIFI_CONNECT_TIMEOUT_MS = 15000;
 constexpr uint32_t WIFI_RETRY_DELAY_MS = 3000;
-constexpr uint8_t WIFI_BOOT_FAILURE_LIMIT = 6;
+constexpr uint32_t WIFI_PROVISIONING_RETRY_DELAY_MS = 10000;
+constexpr uint8_t WIFI_BOOT_FAILURE_LIMIT = 3;
 constexpr uint32_t BLE_IDLE_TIMEOUT_MS = 10 * 60 * 1000UL;
 constexpr uint8_t BLE_AUTH_CODE_LEN = 6;
 constexpr size_t BLE_RPC_CHUNK_PAYLOAD = 19;
@@ -427,19 +428,6 @@ void begin_wifi_connect_attempt(bool reset_failures) {
         return;
     }
 
-    if (WiFi.status() == WL_CONNECTED) {
-        g_wifi_state = WiFiState::CONNECTED;
-        g_wifi_attempt_active = false;
-        g_wifi_next_retry_at_ms = 0;
-        g_wifi_retry_suspended = false;
-        g_wifi_connected_once = true;
-        g_wifi_boot_popup_allowed = false;
-        g_wifi_boot_failures = 0;
-        g_wifi_rssi = WiFi.RSSI();
-        notify_status();
-        return;
-    }
-
     if (!apply_wifi_network_config()) {
         g_wifi_state = WiFiState::FAILED;
         notify_status();
@@ -587,16 +575,33 @@ void add_config_to_response(JsonObject root) {
     radio["rf_guard_single_tx_limit_s"] = radio_config.rf_guard_single_tx_limit_s;
     radio["rf_guard_window_s"] = radio_config.rf_guard_window_s;
     radio["rf_guard_max_tx_in_window_s"] = radio_config.rf_guard_max_tx_in_window_s;
+    radio["adc_gain_db"] = radio_config.adc_gain_db;
+    radio["adc_volume"] = radio_config.adc_volume;
+    radio["dac_volume"] = radio_config.dac_volume;
+    radio["sql_active_high"] = radio_config.sql_active_high;
+    radio["ptt_active_high"] = radio_config.ptt_active_high;
 
     JsonObject server = root["server"].to<JsonObject>();
     server["callsign"] = g_config.server.callsign;
     server["node_ssid"] = g_config.server.node_ssid;
     server["dmr_id"] = g_config.server.dmr_id;
-    server["udp_host"] = g_config.server.udp_host;
-    server["udp_port"] = g_config.server.udp_port;
     server["http_api_base_url"] = g_config.server.http_api_base_url;
     server["account"] = g_config.server.account;
     server["device_auth_password"] = g_config.server.device_auth_password;
+
+    // 只读：UDP 入口由 HTTP 发现接口下发并经本地 ICMP 择优，不接受写入。
+    access_point::Endpoint endpoint = {};
+    JsonObject active = server["access_point"].to<JsonObject>();
+    if (net_audio_link_get_access_point(endpoint)) {
+        active["id"] = endpoint.id;
+        active["display_name"] = endpoint.display_name;
+        active["region"] = endpoint.region;
+        active["udp_host"] = endpoint.host;
+        active["udp_port"] = endpoint.port;
+        if (endpoint.rtt_ms != access_point::RTT_UNKNOWN) {
+            active["rtt_ms"] = endpoint.rtt_ms;
+        }
+    }
 }
 
 bool parse_wifi_config(JsonObjectConst input, device_config::WiFiConfig &config, String &error) {
@@ -652,6 +657,24 @@ bool parse_radio_config(JsonObjectConst input, device_config::RadioConfig &confi
     config.rf_guard_max_tx_in_window_s =
         input["rf_guard_max_tx_in_window_s"] | config.rf_guard_max_tx_in_window_s;
 
+    const int adc_gain_db = input["adc_gain_db"] | static_cast<int>(config.adc_gain_db);
+    const int adc_volume = input["adc_volume"] | static_cast<int>(config.adc_volume);
+    const int dac_volume = input["dac_volume"] | static_cast<int>(config.dac_volume);
+    if (adc_gain_db < 0 || adc_gain_db > device_config::ADC_GAIN_MAX_DB) {
+        error = "ADC gain must be 0-24 dB";
+        return false;
+    }
+    if (adc_volume < 0 || adc_volume > device_config::AUDIO_VOLUME_MAX ||
+        dac_volume < 0 || dac_volume > device_config::AUDIO_VOLUME_MAX) {
+        error = "ADC/DAC volume must be 0-100";
+        return false;
+    }
+    config.adc_gain_db = device_config::normalize_adc_gain_db(static_cast<uint8_t>(adc_gain_db));
+    config.adc_volume = static_cast<uint8_t>(adc_volume);
+    config.dac_volume = static_cast<uint8_t>(dac_volume);
+    config.sql_active_high = input["sql_active_high"] | config.sql_active_high;
+    config.ptt_active_high = input["ptt_active_high"] | config.ptt_active_high;
+
     if (config.tx_frequency_x10000 < 4000000UL || config.tx_frequency_x10000 > 4700000UL ||
         config.rx_frequency_x10000 < 4000000UL || config.rx_frequency_x10000 > 4700000UL) {
         error = "Frequency out of range";
@@ -684,14 +707,6 @@ bool parse_server_config(JsonObjectConst input, device_config::ServerConfig &con
     copy_cstr(config.callsign, input["callsign"] | "");
     config.node_ssid = input["node_ssid"] | 0;
     config.dmr_id = input["dmr_id"] | 0;
-    const char *udp_host = input["udp_host"] | "";
-    if (udp_host[0] != '\0') {
-        copy_cstr(config.udp_host, udp_host);
-    }
-    const uint16_t udp_port = input["udp_port"] | 0;
-    if (udp_port != 0) {
-        config.udp_port = udp_port;
-    }
     const char *http_api_base_url = input["http_api_base_url"] | "";
     if (http_api_base_url[0] != '\0') {
         copy_cstr(config.http_api_base_url, http_api_base_url);
@@ -1010,7 +1025,6 @@ void disable_ble() {
 void enable_ble(const char *reason, bool show_popup) {
     generate_auth_code();
     init_ble_stack();
-    WiFi.setSleep(true);
     start_ble_advertising();
 
     g_ble_enabled = true;
@@ -1031,9 +1045,11 @@ void enable_ble(const char *reason, bool show_popup) {
 
 void maybe_start_ble_for_boot_failure(const char *reason) {
     if (device_config::has_wifi_credentials(g_config.wifi)) {
+        // Keep retrying at a lower rate while provisioning is available. The
+        // router may simply need longer than this device to finish booting.
         g_wifi_attempt_active = false;
         g_wifi_retry_suspended = false;
-        schedule_wifi_retry(WIFI_RETRY_DELAY_MS);
+        schedule_wifi_retry(WIFI_PROVISIONING_RETRY_DELAY_MS);
     } else {
         suspend_wifi_retry_for_ble_provisioning();
     }
@@ -1068,10 +1084,20 @@ void handle_wifi_attempt_failure(const char *reason) {
             ++g_wifi_boot_failures;
         }
 
-        if (g_wifi_boot_failures >= WIFI_BOOT_FAILURE_LIMIT) {
+        if (g_wifi_boot_failures == WIFI_BOOT_FAILURE_LIMIT) {
             maybe_start_ble_for_boot_failure("WiFi link failed repeatedly. BLE GATT provisioning is active.");
             notify_status();
-            Serial.printf("[WIFI] Boot connect failed: %s\n", reason ? reason : "unknown");
+            Serial.printf("[WIFI] Boot connect failed: %s; fallback retry scheduled.\n",
+                          reason ? reason : "unknown");
+            return;
+        }
+
+        if (g_wifi_boot_failures > WIFI_BOOT_FAILURE_LIMIT) {
+            schedule_wifi_retry(WIFI_PROVISIONING_RETRY_DELAY_MS);
+            notify_status();
+            Serial.printf("[WIFI] Fallback connect failure: %s; retrying in %lu ms.\n",
+                          reason ? reason : "unknown",
+                          static_cast<unsigned long>(WIFI_PROVISIONING_RETRY_DELAY_MS));
             return;
         }
     }
@@ -1110,7 +1136,7 @@ void connectivity_manager_init() {
     WiFi.mode(WIFI_STA);
     WiFi.persistent(false);
     WiFi.setAutoReconnect(false);
-    // ESP32-S3 requires Wi-Fi modem sleep while the BLE controller is enabled.
+    // ESP32-S3 requires Wi-Fi modem sleep to stay enabled while BLE is active.
     WiFi.setSleep(true);
     WiFi.onEvent(on_wifi_event);
 
@@ -1159,7 +1185,7 @@ void connectivity_manager_update() {
         g_wifi_boot_popup_allowed = false;
         g_wifi_boot_failures = 0;
         g_wifi_rssi = WiFi.RSSI();
-        if (g_ble_enabled && !g_ble_transport_connected) {
+        if (g_ble_enabled) {
             disable_ble();
         }
         notify_status();
@@ -1245,8 +1271,6 @@ void connectivity_manager_update() {
     if (g_wifi_attempt_active && (now_ms - g_wifi_attempt_started_at_ms) >= WIFI_CONNECT_TIMEOUT_MS) {
         handle_wifi_attempt_failure("timeout");
     } else if (!g_wifi_retry_suspended && !g_wifi_attempt_active &&
-               g_wifi_state != WiFiState::CONNECTED &&
-               WiFi.status() != WL_CONNECTED &&
                g_wifi_next_retry_at_ms != 0 && now_ms >= g_wifi_next_retry_at_ms) {
         begin_wifi_connect_attempt(false);
     }

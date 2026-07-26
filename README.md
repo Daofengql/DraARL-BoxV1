@@ -9,7 +9,7 @@
 3. 网络语音链路：DraARL UDP 鉴权、心跳、Opus 16 kHz 语音收发、网络到 RF 桥接。
 4. 设备运维：NVS 参数持久化、服务器配置同步、时间同步、OTA 检查与升级。
 
-当前固件版本定义在 [`src/config.h`](src/config.h)：`FIRMWARE_VERSION = 0.0.3`，`DEVICE_MODEL = 1`。
+当前固件版本定义在 [`src/config.h`](src/config.h)：`FIRMWARE_VERSION = 0.0.5`，`DEVICE_MODEL = 1`。
 
 ## 授权协议
 
@@ -125,6 +125,8 @@
 | [`src/logic/edit_controller.cpp`](src/logic/edit_controller.cpp) | 主界面/设置页/RF 页/信息页交互，射频参数编辑和持久化 |
 | [`src/logic/connectivity_manager.cpp`](src/logic/connectivity_manager.cpp) | Wi-Fi 状态机、BLE GATT、动态码认证、BLE RPC 配置 |
 | [`src/logic/net_audio_link.cpp`](src/logic/net_audio_link.cpp) | DraARL HTTP/UDP 状态机、绑定、鉴权、心跳、配置同步、语音桥接、RF Guard |
+| [`src/logic/access_point_discovery.cpp`](src/logic/access_point_discovery.cpp) | 入口发现：拉取服务端 UDP 接入点列表、ICMP 测速择优、结果缓存 |
+| [`src/logic/audio_biquad.cpp`](src/logic/audio_biquad.cpp) | 二阶 IIR 节与级联，用于采集侧的语音带通和窄带陷波 |
 | [`src/logic/device_config.cpp`](src/logic/device_config.cpp) | Wi-Fi、Radio、Server、OTA、本地 UI 配置的默认值、校验和 NVS 读写 |
 | [`src/logic/ota_update.cpp`](src/logic/ota_update.cpp) | 固件版本检查、下载、哈希校验、写入 OTA 分区 |
 | [`src/drivers/sa818_driver.cpp`](src/drivers/sa818_driver.cpp) | SA818 AT 指令封装、频率/亚音/静噪/带宽/功率/PTT 控制 |
@@ -208,8 +210,6 @@ RF 功率通过 `SA818_PW` 控制：
 | Server | `svr_call` | 呼号 |
 | Server | `svr_ssid` | 节点 SSID |
 | Server | `svr_dmr` | DMR ID |
-| Server | `svr_udp_h` | UDP 主机 |
-| Server | `svr_udp_p` | UDP 端口 |
 | Server | `svr_http` | HTTP API 基地址 |
 | Server | `svr_acc` | 账号 |
 | Server | `svr_pwd` | 设备准入密码 |
@@ -224,11 +224,14 @@ RF 功率通过 `SA818_PW` 控制：
 | UI | `ui_bl` | 背光亮度 PWM |
 | UI | `ui_ast` | 自启动开关 |
 
+UDP 接入点不再是配置项，由 [`src/logic/access_point_discovery.cpp`](src/logic/access_point_discovery.cpp)
+在开机时向服务端发现，选中结果缓存在独立命名空间 `ap_cache`（`host` / `port` / `id` /
+`name` / `region` / `prio` / `rtt`），仅作为发现失败时的兜底，不接受用户写入。
+
 默认服务器参数：
 
-- UDP Host：`ptt.4l2.cn`
-- UDP Port：`60050`
 - HTTP API Base URL：`https://ptt.4l2.cn`
+- 内置兜底 UDP 入口：`ptt.4l2.cn:60050`
 
 背光亮度保存为 PWM 值，范围 `20` 到 `255`。
 
@@ -237,13 +240,15 @@ RF 功率通过 `SA818_PW` 控制：
 网络链路由 [`src/logic/net_audio_link.cpp`](src/logic/net_audio_link.cpp) 实现。状态机大致为：
 
 ```text
-WAIT_WIFI -> PRECHECK -> REQUEST_CODE / CONFIRM_BIND -> RESOLVE_SERVER -> UDP_AUTH_SEND -> UDP_AUTH_WAIT -> RUNNING
+WAIT_WIFI -> PRECHECK -> REQUEST_CODE / CONFIRM_BIND -> DISCOVER_FETCH -> DISCOVER_PROBE -> RESOLVE_SERVER -> UDP_AUTH_SEND -> UDP_AUTH_WAIT -> RUNNING
 ```
 
 链路能力：
 
 - 若本地没有账号或设备准入密码，会请求动态绑定码并在屏幕上显示。
 - 通过 HTTP 接口完成预检查、请求绑定码、确认绑定。
+- 每次开机做一次入口发现：拉取服务端入口列表，逐个 ICMP 测速后选定最优节点；
+  选定后本次运行不再重测或切换，重启才会重新择优。
 - DNS 解析服务器地址后建立 UDP 会话。
 - 使用 DraARL 包头发送心跳完成 UDP 鉴权。
 - 运行态定时发送心跳，并接收配置、时间和语音包。
@@ -287,6 +292,22 @@ WAIT_WIFI -> PRECHECK -> REQUEST_CODE / CONFIRM_BIND -> RESOLVE_SERVER -> UDP_AU
 | 每包合并 | `2` 帧 |
 
 网络下行语音可触发本地 RF PTT 并桥接到 SA818；本地音频可编码为 Opus 后通过 DraARL UDP 发送。
+
+### 采集侧滤波
+
+ES8388 采到的 PCM 在 Opus 编码前会过一条 IIR 级联（[`src/logic/audio_biquad.cpp`](src/logic/audio_biquad.cpp)），
+参数集中在 [`src/config.h`](src/config.h)：
+
+| 环节 | 默认值 | 说明 |
+| --- | --- | --- |
+| 陷波 | `266 Hz`，`Q=3` | 压掉 ADC 链路上的恒定底噪（疑似板级模拟耦合） |
+| 高通 | `300 Hz`，四阶 Butterworth | 滤掉工频/低频隆隆声 |
+| 低通 | `3800 Hz`，四阶 Butterworth | 限制在 FM 语音带，高端比常规 3 kHz 略放宽 |
+
+实测通带 `400-3400 Hz` 起伏在 1 dB 以内，`100 Hz` 处 -38 dB，`5500 Hz` 处 -24 dB。
+底噪频率若与 `266 Hz` 有偏差，改 `TX_NOTCH_CENTER_HZ` 重新编译即可；
+`Q` 越大陷波越窄，也越容易因为频率漂移而漏掉。滤波器状态在 SQL 中断、
+采集重新开始时清零，避免残留状态引入瞬态。
 
 ## BLE 配置
 
@@ -394,7 +415,7 @@ pio device monitor -b 115200
 ### 打包固件
 
 ```bash
-python tools/package_firmware.py --env esp32s3-n16r8 --version 0.0.3
+python tools/package_firmware.py --env esp32s3-n16r8 --version 0.0.5
 ```
 
 打包脚本会收集 bootloader、分区表、固件和可用的 `boot_app0.bin`，生成 `flash_manifest.json`、`flash_args.txt`、`SHA256SUMS.txt` 和 zip 包。
@@ -417,7 +438,7 @@ python tools/package_firmware.py --env esp32s3-n16r8 --version 0.0.3
 1. 编译并烧录固件。
 2. 上电后长按 `KEY0` 进入启动流程，或提前在 NVS 中启用自启动。
 3. 等待主界面加载。
-4. 若没有 Wi-Fi 配置或连续连接失败，设备会自动开启 BLE 配置弹窗。
+4. 若没有 Wi-Fi 配置或连续连接失败，设备会自动开启 BLE 配置弹窗；已有配置时仍会在后台低频重试，以兼容路由器启动较慢的场景，连接成功后自动关闭 BLE。
 5. 用支持 Web Bluetooth 的浏览器打开 [`web/ble-config.html`](web/ble-config.html)。
 6. 连接 `DraARL-XXXXXX` 设备并输入屏幕上的 6 位动态码。
 7. 写入 Wi-Fi、射频和服务器配置。
@@ -442,6 +463,7 @@ python tools/package_firmware.py --env esp32s3-n16r8 --version 0.0.3
 
 - 检查 SSID、密码、路由器频段。
 - 如果使用静态 IP，确认 IP、网关、掩码、DNS。
+- 已保存 Wi-Fi 配置时，BLE 配网弹出后设备仍会每 10 秒尝试重新连接。
 - 连续失败后可通过 BLE 配置页重新写入网络参数。
 
 ### BLE 配置页无法连接
@@ -454,10 +476,11 @@ python tools/package_firmware.py --env esp32s3-n16r8 --version 0.0.3
 ### 服务器图标保持告警
 
 - 确认 Wi-Fi 已连接。
-- 检查 HTTP API 地址、UDP 主机、UDP 端口。
+- 检查 HTTP API 地址是否可达，入口列表由该地址下发。
 - 检查账号、设备准入密码、节点 SSID、DMR ID 和呼号。
 - 若设备未绑定，按屏幕动态码在 Web 控制台完成绑定。
-- 结合串口中的 `[NET]`、`[OTA]`、`[TIME]` 日志定位阶段。
+- 结合串口中的 `[NET]`、`[NET][AP]`、`[AP]`、`[OTA]`、`[TIME]` 日志定位阶段；
+  `[NET][AP]` 会打印本次选中的入口与实测 RTT。
 
 ### 时间不显示或显示占位符
 

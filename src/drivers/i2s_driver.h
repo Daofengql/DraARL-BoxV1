@@ -7,8 +7,6 @@
 // I2S 配置参数
 #define I2S_PORT_NUM        I2S_NUM_0
 #define I2S_SAMPLE_RATE     16000
-#define I2S_MCLK_MULTIPLIER 1024U
-#define I2S_MCLK_HZ         (I2S_SAMPLE_RATE * I2S_MCLK_MULTIPLIER)
 #define I2S_BITS_PER_SAMPLE I2S_BITS_PER_SAMPLE_16BIT
 #define I2S_DMA_BUF_COUNT   8
 #define I2S_DMA_BUF_LEN     256
@@ -34,13 +32,27 @@ void i2s_driver_deinit(void);
 bool i2s_write(const void *data, size_t len, size_t *bytes_written);
 
 /**
- * @brief 读取音频数据
+ * @brief 读取音频数据（阻塞直到读满）
  * @param data 数据缓冲区
  * @param len 读取长度
  * @param bytes_read 实际读取字节数
  * @return true 成功
  */
 bool i2s_read(void *data, size_t len, size_t *bytes_read);
+
+/**
+ * @brief 读取音频数据，最多等待指定时间
+ *
+ * ticks_to_wait 传 0 即为纯轮询：DMA 里有多少取多少，立即返回，
+ * 不会阻塞调用线程。调用方需要自行累积不足一帧的部分。
+ *
+ * @param data 数据缓冲区
+ * @param len 期望读取长度
+ * @param bytes_read 实际读取字节数
+ * @param ticks_to_wait 最长等待的 FreeRTOS tick 数
+ * @return true 驱动调用成功（可能读到 0 字节）
+ */
+bool i2s_read_timeout(void *data, size_t len, size_t *bytes_read, uint32_t ticks_to_wait);
 
 /**
  * @brief 设置采样率

@@ -9,6 +9,7 @@
 void edit_controller_init();
 void edit_controller_on_enter_main_screen();
 bool edit_controller_boot_radio_init();
+uint8_t edit_controller_get_device_model();
 void edit_controller_update();
 void edit_controller_on_encoder_event(EC11Event event, int32_t value);
 void edit_controller_on_key0_short_press();

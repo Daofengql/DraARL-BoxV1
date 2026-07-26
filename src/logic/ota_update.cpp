@@ -2,6 +2,7 @@
 #include "device_config.h"
 #include "http_response_buffer.h"
 #include "http_request_gate.h"
+#include "edit_controller.h"
 #include "version_utils.h"
 #include "../config.h"
 
@@ -289,7 +290,7 @@ bool check_for_update(FirmwareInfo &info) {
 
     Serial.printf("[OTA] Check context: base=%s model=%d current=%s auto=%d pending=%d wifi_ip=%s rssi=%ld\n",
                   config.server.http_api_base_url[0] != '\0' ? config.server.http_api_base_url : "<empty>",
-                  DEVICE_MODEL,
+                  edit_controller_get_device_model(),
                   FIRMWARE_VERSION,
                   config.ota.auto_check_enabled ? 1 : 0,
                   config.ota.has_pending_update ? 1 : 0,
@@ -318,7 +319,7 @@ bool check_for_update(FirmwareInfo &info) {
                  sizeof(url),
                  "%s/api/public/firmware/latest?dev_model=%d&current_version=%s",
                  api_base_candidates[i],
-                 DEVICE_MODEL,
+                 edit_controller_get_device_model(),
                  FIRMWARE_VERSION);
 
         Serial.printf("[OTA] GET %s%s\n",

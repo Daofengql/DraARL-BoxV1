@@ -132,6 +132,11 @@ bool rf_guard_enabled = device_config::RF_GUARD_ENABLED_DEFAULT;
 uint16_t rf_guard_single_tx_limit_s = device_config::RF_GUARD_SINGLE_TX_LIMIT_DEFAULT_S;
 uint16_t rf_guard_window_s = device_config::RF_GUARD_WINDOW_DEFAULT_S;
 uint16_t rf_guard_max_tx_in_window_s = device_config::RF_GUARD_MAX_TX_IN_WINDOW_DEFAULT_S;
+uint8_t audio_adc_gain_db = device_config::ADC_GAIN_DEFAULT_DB;
+uint8_t audio_adc_volume = device_config::ADC_VOLUME_DEFAULT;
+uint8_t audio_dac_volume = device_config::DAC_VOLUME_DEFAULT;
+bool sql_active_high = device_config::SQL_ACTIVE_HIGH_DEFAULT;
+bool ptt_active_high = device_config::PTT_ACTIVE_HIGH_DEFAULT;
 
 uint8_t digit_positions[16] = {};
 uint8_t digit_count = 0;
@@ -362,7 +367,7 @@ void log_radio_config(const char *tag) {
     format_subaudio_text_compact(tx_subaudio, tx_tone, sizeof(tx_tone));
     format_subaudio_text_compact(rx_subaudio, rx_tone, sizeof(rx_tone));
 
-    Serial.printf("[RADIO][%s] TX=%s RX=%s TXTone=%s RXTone=%s SQL=%u BW=%s PWR=%s Guard=%d Single=%us Window=%us Max=%us dirty=%d\n",
+    Serial.printf("[RADIO][%s] TX=%s RX=%s TXTone=%s RXTone=%s SQL=%u BW=%s PWR=%s Guard=%d Single=%us Window=%us Max=%us ADCGain=%udB ADCVol=%u DACVol=%u SQLHigh=%d PTTHigh=%d dirty=%d\n",
                   tag ? tag : "LOG",
                   tx_freq,
                   rx_freq,
@@ -375,6 +380,11 @@ void log_radio_config(const char *tag) {
                   static_cast<unsigned int>(rf_guard_single_tx_limit_s),
                   static_cast<unsigned int>(rf_guard_window_s),
                   static_cast<unsigned int>(rf_guard_max_tx_in_window_s),
+                  static_cast<unsigned int>(audio_adc_gain_db),
+                  static_cast<unsigned int>(audio_adc_volume),
+                  static_cast<unsigned int>(audio_dac_volume),
+                  sql_active_high ? 1 : 0,
+                  ptt_active_high ? 1 : 0,
                   radio_cfg_dirty ? 1 : 0);
 }
 
@@ -567,11 +577,18 @@ void build_subaudio_string(const SubAudioSetting &setting, char *buffer, size_t 
     }
 }
 
+void apply_board_io_polarity() {
+    const bool configurable = !radio_module_ready;
+    sa818_set_sql_active_high(configurable ? sql_active_high : false);
+    sa818_set_ptt_active_high(configurable ? ptt_active_high : false);
+}
+
 bool apply_all_radio_config_to_sa818() {
     if (!radio_module_ready || !sa818_is_enabled()) {
         return false;
     }
 
+    apply_board_io_polarity();
     sa818_set_power(radio_power_high ? SA818Power::POWER_HIGH : SA818Power::POWER_LOW);
 
     char tx_sub[8] = {0};
@@ -603,6 +620,11 @@ device_config::RadioConfig build_radio_config_snapshot() {
     config.rf_guard_single_tx_limit_s = rf_guard_single_tx_limit_s;
     config.rf_guard_window_s = rf_guard_window_s;
     config.rf_guard_max_tx_in_window_s = rf_guard_max_tx_in_window_s;
+    config.adc_gain_db = audio_adc_gain_db;
+    config.adc_volume = audio_adc_volume;
+    config.dac_volume = audio_dac_volume;
+    config.sql_active_high = sql_active_high;
+    config.ptt_active_high = ptt_active_high;
     return config;
 }
 
@@ -635,6 +657,15 @@ void apply_runtime_radio_config(const device_config::RadioConfig &config) {
         device_config::RF_GUARD_MAX_TX_IN_WINDOW_MIN_S,
         rf_guard_window_s
     );
+    audio_adc_gain_db = device_config::normalize_adc_gain_db(config.adc_gain_db);
+    audio_adc_volume = config.adc_volume <= device_config::AUDIO_VOLUME_MAX
+        ? config.adc_volume
+        : device_config::ADC_VOLUME_DEFAULT;
+    audio_dac_volume = config.dac_volume <= device_config::AUDIO_VOLUME_MAX
+        ? config.dac_volume
+        : device_config::DAC_VOLUME_DEFAULT;
+    sql_active_high = config.sql_active_high;
+    ptt_active_high = config.ptt_active_high;
 }
 
 void load_radio_config_from_storage() {
@@ -850,10 +881,9 @@ void execute_power_popup_action() {
             // Put SA818 control lines into a defined power-down state.
             pinMode(SA818_EN, OUTPUT);
             digitalWrite(SA818_EN, LOW);
-            pinMode(SA818_PTT, OUTPUT);
-            digitalWrite(SA818_PTT, HIGH);
-            pinMode(SA818_SQL, OUTPUT);
-            digitalWrite(SA818_SQL, HIGH);
+            apply_board_io_polarity();
+            sa818_stop_tx();
+            pinMode(SA818_SQL, INPUT);
             Serial.println("[PWR] Entering deep sleep (power off).");
             delay(30);
             esp_deep_sleep_start();
@@ -1503,8 +1533,18 @@ void refresh_info_page_content() {
              static_cast<unsigned int>(mac & 0xFFULL));
 
     char server_text[96] = {0};
-    if (config.server.udp_host[0] != '\0' && config.server.udp_port != 0) {
-        snprintf(server_text, sizeof(server_text), "%s:%u", config.server.udp_host, config.server.udp_port);
+    access_point::Endpoint endpoint = {};
+    if (net_audio_link_get_access_point(endpoint)) {
+        if (endpoint.rtt_ms != access_point::RTT_UNKNOWN) {
+            snprintf(server_text,
+                     sizeof(server_text),
+                     "%s:%u (%ums)",
+                     endpoint.host,
+                     static_cast<unsigned int>(endpoint.port),
+                     static_cast<unsigned int>(endpoint.rtt_ms));
+        } else {
+            snprintf(server_text, sizeof(server_text), "%s:%u", endpoint.host, static_cast<unsigned int>(endpoint.port));
+        }
     }
 
     char ip_text[20] = {0};
@@ -2062,9 +2102,15 @@ bool edit_controller_boot_radio_init() {
     radio_module_ready = false;
 
     if (!sa818_init(SA818Type::SA818_UHF)) {
+        apply_board_io_polarity();
         Serial.println("SA818 init failed.");
+        Serial.printf("Runtime device model=%u (SA818 unavailable).\n",
+                      static_cast<unsigned int>(DEVICE_MODEL_NO_RF));
         return false;
     }
+
+    sa818_set_sql_active_high(sql_active_high);
+    sa818_set_ptt_active_high(ptt_active_high);
 
     // Required boot sequence: EN high -> wait 500ms -> send AT probe.
     sa818_enable(true);
@@ -2073,10 +2119,15 @@ bool edit_controller_boot_radio_init() {
     const bool at_ok = sa818_is_connected();
     if (!at_ok) {
         Serial.println("SA818 AT probe failed.");
+        Serial.printf("Runtime device model=%u (SA818 unavailable).\n",
+                      static_cast<unsigned int>(DEVICE_MODEL_NO_RF));
         return false;
     }
 
     radio_module_ready = true;
+    apply_board_io_polarity();
+    Serial.printf("Runtime device model=%u (SA818 detected).\n",
+                  static_cast<unsigned int>(DEVICE_MODEL_RF));
     sql_rx_active = sa818_is_rx();
 
     const bool cfg_ok = apply_all_radio_config_to_sa818();
@@ -2086,6 +2137,10 @@ bool edit_controller_boot_radio_init() {
         log_radio_config("BOOT_APPLY");
     }
     return cfg_ok;
+}
+
+uint8_t edit_controller_get_device_model() {
+    return radio_module_ready ? DEVICE_MODEL_RF : DEVICE_MODEL_NO_RF;
 }
 
 void edit_controller_update() {
@@ -2355,6 +2410,7 @@ bool edit_controller_set_radio_config(const device_config::RadioConfig &config, 
     }
 
     apply_runtime_radio_config(config);
+    apply_board_io_polarity();
     radio_cfg_dirty = !persist;
 
     if (persist) {

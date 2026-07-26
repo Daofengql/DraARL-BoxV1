@@ -20,12 +20,16 @@
 #include <cstdio>
 #include <cstring>
 
+#include "../config.h"
 #include "../drivers/es8388_driver.h"
 #include "../drivers/i2c_driver.h"
 #include "../drivers/i2s_driver.h"
 #include "../drivers/sa818_driver.h"
 #include "../ui/ui.h"
+#include "access_point_discovery.h"
 #include "app_logic.h"
+#include "audio_biquad.h"
+#include "audio_expander.h"
 #include "connectivity_manager.h"
 #include "device_config.h"
 #include "edit_controller.h"
@@ -42,7 +46,6 @@ constexpr uint8_t TYPE_CONFIG = 3;
 constexpr uint8_t TYPE_OPUS_16K = 5;
 constexpr uint8_t TYPE_SERVER_VOICE = 6;
 
-constexpr uint8_t DEV_MODEL_ESP32 = 1;
 constexpr size_t HEARTBEAT_GPS_PAYLOAD_SIZE = 24;
 constexpr size_t HEARTBEAT_MAC_TEXT_SIZE = 17;
 constexpr uint8_t HEARTBEAT_STATUS_SUCCESS = 0;
@@ -67,6 +70,10 @@ constexpr uint32_t BIND_POLL_MS = 5000;
 constexpr uint32_t DYNAMIC_CODE_REFRESH_MS = 55000;
 constexpr uint32_t REQUEST_CODE_RETRY_MS = 60000;
 constexpr uint32_t RESOLVE_RETRY_MS = 3000;
+constexpr uint32_t DISCOVER_POLL_MS = 50;
+// 每轮主循环处理的 UDP 包上限。语音是 2 帧/包、120 ms/包，
+// 取 8 相当于单轮最多消化约 1 秒的积压，足够吸收抖动又不会长时间占用主循环。
+constexpr uint8_t UDP_MAX_PACKETS_PER_POLL = 8;
 constexpr uint32_t AUTH_TIMEOUT_MS = 3000;
 constexpr uint8_t AUTH_RETRY_LIMIT = 3;
 constexpr uint32_t HEARTBEAT_INTERVAL_MS = 5000;
@@ -80,7 +87,6 @@ constexpr uint32_t RF_GUARD_NEXT_BURST_GAP_MS = 3000;
 constexpr bool AUDIO_STATS_LOG_ENABLED = false;
 constexpr uint32_t AUDIO_STATS_LOG_INTERVAL_MS = 5000;
 constexpr uint32_t AUDIO_ERROR_LOG_INTERVAL_MS = 2000;
-constexpr bool NET_TO_RF_DEBUG_LOG_ENABLED = false;
 
 constexpr uint8_t CONFIG_CMD_QUERY = 0x01;
 constexpr uint8_t CONFIG_CMD_APPLY = 0x02;
@@ -102,6 +108,11 @@ constexpr uint8_t CONFIG_TLV_RF_GUARD_SINGLE_TX_LIMIT_S = 0x0D;
 constexpr uint8_t CONFIG_TLV_RF_GUARD_WINDOW_S = 0x0E;
 constexpr uint8_t CONFIG_TLV_RF_GUARD_MAX_TX_IN_WINDOW_S = 0x0F;
 constexpr uint8_t CONFIG_TLV_TIMESTAMP = 0x10;
+constexpr uint8_t CONFIG_TLV_ADC_GAIN = 0x11;
+constexpr uint8_t CONFIG_TLV_ADC_VOLUME = 0x12;
+constexpr uint8_t CONFIG_TLV_DAC_VOLUME = 0x13;
+constexpr uint8_t CONFIG_TLV_SQL_ACTIVE_HIGH = 0x14;
+constexpr uint8_t CONFIG_TLV_PTT_ACTIVE_HIGH = 0x15;
 constexpr int64_t VALID_TIME_SYNC_MIN_MS = 946684800000LL;   // 2000-01-01T00:00:00Z
 constexpr int64_t VALID_TIME_SYNC_MAX_MS = 4102444800000LL;  // 2100-01-01T00:00:00Z
 
@@ -129,6 +140,8 @@ enum class LinkState : uint8_t {
     PRECHECK,
     REQUEST_CODE,
     CONFIRM_BIND,
+    DISCOVER_FETCH,
+    DISCOVER_PROBE,
     RESOLVE_SERVER,
     UDP_AUTH_SEND,
     UDP_AUTH_WAIT,
@@ -173,8 +186,6 @@ struct AudioRxStats {
     uint32_t merged_parse_fail = 0;
     uint32_t server_voice_short = 0;
     uint32_t rf_guard_drop = 0;
-    uint16_t last_pcm_peak = 0;
-    uint16_t max_pcm_peak = 0;
 };
 
 struct AudioTxStats {
@@ -193,6 +204,12 @@ struct RfGuardConfig {
     uint16_t max_tx_in_window_s = device_config::RF_GUARD_MAX_TX_IN_WINDOW_DEFAULT_S;
 };
 
+struct AudioCodecConfig {
+    uint8_t adc_gain_db = device_config::ADC_GAIN_DEFAULT_DB;
+    uint8_t adc_volume = device_config::ADC_VOLUME_DEFAULT;
+    uint8_t dac_volume = device_config::DAC_VOLUME_DEFAULT;
+};
+
 device_config::DeviceConfig g_config = {};
 bool g_initialized = false;
 bool g_main_screen_ready = false;
@@ -201,6 +218,8 @@ bool g_i2c_ready = false;
 bool g_codec_ready = false;
 bool g_i2s_ready = false;
 bool g_opus_ready = false;
+AudioCodecConfig g_audio_codec_config = {};
+bool g_audio_codec_config_initialized = false;
 
 LinkState g_state = LinkState::IDLE;
 uint32_t g_next_action_at_ms = 0;
@@ -216,6 +235,16 @@ bool g_udp_open = false;
 IPAddress g_server_ip;
 uint16_t g_server_port = 0;
 uint16_t g_local_port = 0;
+
+// 入口发现：候选列表由服务端下发，逐个 ICMP 探测后挑选最优节点。
+access_point::Endpoint g_ap_candidates[access_point::MAX_CANDIDATES] = {};
+size_t g_ap_candidate_count = 0;
+size_t g_ap_probe_index = 0;
+bool g_ap_probe_running = false;
+access_point::Endpoint g_active_ap = {};
+// 本次开机已选定入口。选定后运行期间不再重测、不再切换，
+// 下次重启才会重新拉列表并做 ICMP 择优。
+bool g_ap_selected_this_boot = false;
 
 OpusEncoder *g_opus_encoder = nullptr;
 OpusDecoder *g_opus_decoder = nullptr;
@@ -257,6 +286,15 @@ bool g_rf_capture_adc_muted = false;
 uint8_t g_rt_packet_buffer[DRA_MAX_PACKET_SIZE] = {0};
 int16_t g_rt_pcm_work[RT_PCM_WORK_SAMPLES] = {0};
 int16_t g_tx_pcm_mono[OPUS_TX_FRAME_SAMPLES] = {0};
+// 采集侧滤波：FM 语音带通 + 压掉 ES8388 ADC 上那个恒定的 ~266 Hz 底噪，
+// 再用向下扩展器压低弱信号时暴露出来的本底。
+audio_biquad::Chain g_tx_filter = {};
+audio_expander::State g_tx_expander = {};
+// 采集是按 SQL 断续进行的，中断后重新开始要清一次滤波器和包络历史。
+bool g_tx_capture_active = false;
+// 采集帧累积缓冲：i2s 用零超时轮询，不足一帧的部分留到下一轮主循环。
+int16_t g_tx_capture_accum[OPUS_TX_FRAME_SAMPLES * 2] = {0};
+size_t g_tx_capture_accum_bytes = 0;
 uint8_t g_tx_opus_buffer[OPUS_TX_MAX_BYTES] = {0};
 uint8_t g_tx_merged_payload[OPUS_TX_MERGED_MAX_BYTES] = {0};
 size_t g_tx_merged_payload_len = 0;
@@ -619,7 +657,59 @@ bool radio_config_equals(const device_config::RadioConfig &lhs, const device_con
            lhs.rf_guard_enabled == rhs.rf_guard_enabled &&
            lhs.rf_guard_single_tx_limit_s == rhs.rf_guard_single_tx_limit_s &&
            lhs.rf_guard_window_s == rhs.rf_guard_window_s &&
-           lhs.rf_guard_max_tx_in_window_s == rhs.rf_guard_max_tx_in_window_s;
+           lhs.rf_guard_max_tx_in_window_s == rhs.rf_guard_max_tx_in_window_s &&
+           lhs.adc_gain_db == rhs.adc_gain_db &&
+           lhs.adc_volume == rhs.adc_volume &&
+           lhs.dac_volume == rhs.dac_volume &&
+           lhs.sql_active_high == rhs.sql_active_high &&
+           lhs.ptt_active_high == rhs.ptt_active_high;
+}
+
+bool audio_codec_config_equals(const AudioCodecConfig &lhs, const AudioCodecConfig &rhs) {
+    return lhs.adc_gain_db == rhs.adc_gain_db &&
+           lhs.adc_volume == rhs.adc_volume &&
+           lhs.dac_volume == rhs.dac_volume;
+}
+
+AudioCodecConfig read_audio_codec_config_from_runtime() {
+    device_config::RadioConfig radio_config = {};
+    edit_controller_get_radio_config(radio_config);
+
+    AudioCodecConfig config = {};
+    config.adc_gain_db = device_config::normalize_adc_gain_db(radio_config.adc_gain_db);
+    config.adc_volume = radio_config.adc_volume <= device_config::AUDIO_VOLUME_MAX
+        ? radio_config.adc_volume
+        : device_config::ADC_VOLUME_DEFAULT;
+    config.dac_volume = radio_config.dac_volume <= device_config::AUDIO_VOLUME_MAX
+        ? radio_config.dac_volume
+        : device_config::DAC_VOLUME_DEFAULT;
+    return config;
+}
+
+void apply_audio_codec_config(const AudioCodecConfig &config) {
+    if (!g_codec_ready) {
+        return;
+    }
+
+    es8388_set_adc_gain(config.adc_gain_db);
+    es8388_set_adc_volume(config.adc_volume);
+    es8388_set_dac_volume(config.dac_volume);
+    Serial.printf("[NET][AUDIO][CFG] adc_gain=%udB adc_volume=%u dac_volume=%u\n",
+                  static_cast<unsigned int>(config.adc_gain_db),
+                  static_cast<unsigned int>(config.adc_volume),
+                  static_cast<unsigned int>(config.dac_volume));
+}
+
+void update_audio_codec_runtime_config() {
+    const AudioCodecConfig latest = read_audio_codec_config_from_runtime();
+    if (g_audio_codec_config_initialized &&
+        audio_codec_config_equals(g_audio_codec_config, latest)) {
+        return;
+    }
+
+    g_audio_codec_config = latest;
+    g_audio_codec_config_initialized = true;
+    apply_audio_codec_config(g_audio_codec_config);
 }
 
 bool rf_guard_config_equals(const RfGuardConfig &lhs, const RfGuardConfig &rhs) {
@@ -933,6 +1023,8 @@ const void *server_status_icon() {
         case LinkState::PRECHECK:
         case LinkState::REQUEST_CODE:
         case LinkState::CONFIRM_BIND:
+        case LinkState::DISCOVER_FETCH:
+        case LinkState::DISCOVER_PROBE:
         case LinkState::RESOLVE_SERVER:
         case LinkState::UDP_AUTH_SEND:
         case LinkState::UDP_AUTH_WAIT:
@@ -974,6 +1066,8 @@ const char *state_name(LinkState state) {
         case LinkState::PRECHECK: return "PRECHECK";
         case LinkState::REQUEST_CODE: return "REQUEST_CODE";
         case LinkState::CONFIRM_BIND: return "CONFIRM_BIND";
+        case LinkState::DISCOVER_FETCH: return "DISCOVER_FETCH";
+        case LinkState::DISCOVER_PROBE: return "DISCOVER_PROBE";
         case LinkState::RESOLVE_SERVER: return "RESOLVE_SERVER";
         case LinkState::UDP_AUTH_SEND: return "UDP_AUTH_SEND";
         case LinkState::UDP_AUTH_WAIT: return "UDP_AUTH_WAIT";
@@ -1273,9 +1367,6 @@ void stop_voice_bridge() {
         app_logic_on_ptt_released();
         edit_controller_set_network_bridge_active(false);
         begin_rf_capture_suppression(now_ms);
-        if (NET_TO_RF_DEBUG_LOG_ENABLED) {
-            Serial.printf("[NET][AUDIO][RX] bridge stop at=%lu\n", static_cast<unsigned long>(now_ms));
-        }
     }
     edit_controller_set_network_bridge_source(nullptr, 0);
     g_voice_state = VoiceBridgeState::IDLE;
@@ -1326,13 +1417,6 @@ bool mark_voice_packet_received() {
     g_voice_state = VoiceBridgeState::NET_TO_RF_ACTIVE;
     edit_controller_set_network_bridge_active(true);
     on_voice_bridge_started(now_ms);
-    if (NET_TO_RF_DEBUG_LOG_ENABLED) {
-        Serial.printf("[NET][AUDIO][RX] bridge start at=%lu gap=%lu sql=%d budget=%.1f\n",
-                      static_cast<unsigned long>(now_ms),
-                      static_cast<unsigned long>(packet_gap_ms),
-                      sa818_is_rx() ? 1 : 0,
-                      static_cast<double>(g_rf_guard_budget_ms));
-    }
     delay(VOICE_BRIDGE_PTT_SETTLE_MS);
     return true;
 }
@@ -1347,9 +1431,57 @@ void check_voice_timeout() {
     }
 }
 
+// 陷波放在最前，再接带通的高低端；LTI 级联顺序不影响幅频响应，
+// 这样排只是让日志和调试时的意图更直观。
+void setup_tx_audio_filter() {
+    constexpr float fs = static_cast<float>(OPUS_SAMPLE_RATE);
+    audio_biquad::chain_clear(g_tx_filter);
+
+#if TX_NOTCH_ENABLED
+    if (!audio_biquad::chain_add_notch(g_tx_filter, fs, TX_NOTCH_CENTER_HZ, TX_NOTCH_Q)) {
+        Serial.printf("[NET][AUDIO][TX] notch %.0fHz rejected\n",
+                      static_cast<double>(TX_NOTCH_CENTER_HZ));
+    }
+#endif
+#if TX_BANDPASS_ENABLED
+    if (!audio_biquad::chain_add_highpass4(g_tx_filter, fs, TX_BANDPASS_LOW_HZ) ||
+        !audio_biquad::chain_add_lowpass4(g_tx_filter, fs, TX_BANDPASS_HIGH_HZ)) {
+        Serial.printf("[NET][AUDIO][TX] bandpass %.0f-%.0fHz rejected\n",
+                      static_cast<double>(TX_BANDPASS_LOW_HZ),
+                      static_cast<double>(TX_BANDPASS_HIGH_HZ));
+    }
+#endif
+
+    Serial.printf("[NET][AUDIO][TX] capture filter sections=%u\n",
+                  static_cast<unsigned int>(g_tx_filter.count));
+
+#if TX_EXPANDER_ENABLED
+    if (audio_expander::configure(g_tx_expander,
+                                  fs,
+                                  TX_EXPANDER_THRESHOLD_DBFS,
+                                  TX_EXPANDER_MAX_ATTEN_DB,
+                                  TX_EXPANDER_ATTACK_MS,
+                                  TX_EXPANDER_RELEASE_MS)) {
+        Serial.printf("[NET][AUDIO][TX] expander th=%.0fdBFS max=%.0fdB\n",
+                      static_cast<double>(TX_EXPANDER_THRESHOLD_DBFS),
+                      static_cast<double>(TX_EXPANDER_MAX_ATTEN_DB));
+    } else {
+        Serial.println("[NET][AUDIO][TX] expander rejected, bypassed");
+    }
+#else
+    audio_expander::disable(g_tx_expander);
+#endif
+}
+
 void reset_tx_audio_merge() {
     g_tx_merged_payload_len = 0;
     g_tx_merged_frame_count = 0;
+    g_tx_capture_accum_bytes = 0;
+    if (g_tx_capture_active) {
+        g_tx_capture_active = false;
+        audio_biquad::chain_reset(g_tx_filter);
+        audio_expander::reset(g_tx_expander);
+    }
 }
 
 void close_udp_session() {
@@ -1534,16 +1666,125 @@ ConfirmBindResult perform_confirm_bind() {
     return ConfirmBindResult::READY;
 }
 
-bool resolve_and_open_udp() {
-    if (g_config.server.udp_host[0] == '\0' || g_config.server.udp_port == 0) {
+void log_active_access_point(const char *source) {
+    if (g_active_ap.rtt_ms == access_point::RTT_UNKNOWN) {
+        Serial.printf("[NET][AP] %s -> %s (%s) %s:%u rtt=n/a\n",
+                      source,
+                      g_active_ap.id,
+                      g_active_ap.display_name,
+                      g_active_ap.host,
+                      static_cast<unsigned int>(g_active_ap.port));
+        return;
+    }
+    Serial.printf("[NET][AP] %s -> %s (%s) %s:%u rtt=%ums\n",
+                  source,
+                  g_active_ap.id,
+                  g_active_ap.display_name,
+                  g_active_ap.host,
+                  static_cast<unsigned int>(g_active_ap.port),
+                  static_cast<unsigned int>(g_active_ap.rtt_ms));
+}
+
+// 发现失败时退回上次可用入口，再退回编译内置入口，保证链路不会因为
+// HTTP 接口暂时不可达而彻底断掉。
+void fall_back_to_known_access_point() {
+    if (access_point::load_cached(g_active_ap)) {
+        log_active_access_point("cached");
+    } else {
+        access_point::fallback_endpoint(g_active_ap);
+        log_active_access_point("builtin");
+    }
+    g_ap_selected_this_boot = true;
+}
+
+// 本次开机已经选过入口就直接复用，跳过发现与 ICMP 探测：
+// WiFi 接入位置在运行期间不会变，重测只会带来无谓的链路抖动。
+LinkState state_after_credentials_ready() {
+    if (g_ap_selected_this_boot && access_point::is_usable(g_active_ap)) {
+        log_active_access_point("pinned");
+        return LinkState::RESOLVE_SERVER;
+    }
+    return LinkState::DISCOVER_FETCH;
+}
+
+bool begin_access_point_discovery() {
+    g_ap_candidate_count = 0;
+    g_ap_probe_index = 0;
+    g_ap_probe_running = false;
+    access_point::probe_abort();
+
+    return access_point::fetch_candidates(g_config.server.http_api_base_url,
+                                          g_config.server.account,
+                                          g_config.server.device_auth_password,
+                                          g_ap_candidates,
+                                          access_point::MAX_CANDIDATES,
+                                          g_ap_candidate_count);
+}
+
+// 每次调用最多推进一个候选（一次 DNS 解析或一次探测轮询），
+// 避免在主循环里长时间阻塞 LVGL 刷新。返回 true 表示全部候选已探测完毕。
+bool step_access_point_probe() {
+    if (g_ap_probe_running) {
+        uint16_t rtt_ms = access_point::RTT_UNKNOWN;
+        if (!access_point::probe_poll(rtt_ms)) {
+            return false;
+        }
+        g_ap_probe_running = false;
+        g_ap_candidates[g_ap_probe_index].rtt_ms = rtt_ms;
+        if (rtt_ms == access_point::RTT_UNKNOWN) {
+            Serial.printf("[NET][AP] probe %s unreachable\n", g_ap_candidates[g_ap_probe_index].host);
+        } else {
+            Serial.printf("[NET][AP] probe %s rtt=%ums\n",
+                          g_ap_candidates[g_ap_probe_index].host,
+                          static_cast<unsigned int>(rtt_ms));
+        }
+        ++g_ap_probe_index;
+    }
+
+    if (g_ap_probe_index >= g_ap_candidate_count) {
+        return true;
+    }
+
+    access_point::Endpoint &candidate = g_ap_candidates[g_ap_probe_index];
+    IPAddress ip;
+    if (WiFi.hostByName(candidate.host, ip) != 1) {
+        Serial.printf("[NET][AP] resolve failed: %s\n", candidate.host);
+        candidate.port = 0;
+        ++g_ap_probe_index;
         return false;
     }
-    if (WiFi.hostByName(g_config.server.udp_host, g_server_ip) != 1) {
-        Serial.printf("[NET] resolve failed: %s\n", g_config.server.udp_host);
+    if (!access_point::probe_start(ip)) {
+        candidate.rtt_ms = access_point::RTT_UNKNOWN;
+        ++g_ap_probe_index;
         return false;
     }
 
-    g_server_port = g_config.server.udp_port;
+    g_ap_probe_running = true;
+    return false;
+}
+
+void finish_access_point_discovery() {
+    access_point::Endpoint selected = {};
+    if (access_point::select_best(g_ap_candidates, g_ap_candidate_count, selected)) {
+        g_active_ap = selected;
+        g_ap_selected_this_boot = true;
+        access_point::save_cached(g_active_ap);
+        log_active_access_point("selected");
+        return;
+    }
+    fall_back_to_known_access_point();
+}
+
+bool resolve_and_open_udp() {
+    if (!access_point::is_usable(g_active_ap)) {
+        return false;
+    }
+    if (WiFi.hostByName(g_active_ap.host, g_server_ip) != 1) {
+        Serial.printf("[NET] resolve failed: %s\n", g_active_ap.host);
+        return false;
+    }
+
+    g_server_port = g_active_ap.port;
     if (g_udp_open) {
         return true;
     }
@@ -1578,7 +1819,7 @@ size_t build_dra_packet(uint8_t type, const uint8_t *payload, size_t payload_len
     write_padded_field(out + 6, 32, g_config.server.account);
     write_padded_field(out + 38, 10, g_config.server.device_auth_password);
     out[48] = type;
-    out[49] = DEV_MODEL_ESP32;
+    out[49] = edit_controller_get_device_model();
     out[50] = g_config.server.node_ssid;
 
     const uint32_t dmr_id = g_config.server.dmr_id & 0xFFFFFFUL;
@@ -1728,13 +1969,30 @@ bool build_radio_config_payload(uint8_t *payload, size_t payload_cap, size_t &pa
     write_u16_be(buffer2, config.rf_guard_max_tx_in_window_s);
     if (!append_tlv_with_count(CONFIG_TLV_RF_GUARD_MAX_TX_IN_WINDOW_S, buffer2, sizeof(buffer2))) return false;
 
+    buffer1[0] = config.adc_gain_db;
+    if (!append_tlv_with_count(CONFIG_TLV_ADC_GAIN, buffer1, sizeof(buffer1))) return false;
+
+    buffer1[0] = config.adc_volume;
+    if (!append_tlv_with_count(CONFIG_TLV_ADC_VOLUME, buffer1, sizeof(buffer1))) return false;
+
+    buffer1[0] = config.dac_volume;
+    if (!append_tlv_with_count(CONFIG_TLV_DAC_VOLUME, buffer1, sizeof(buffer1))) return false;
+
+    if (edit_controller_get_device_model() == DEVICE_MODEL_NO_RF) {
+        buffer1[0] = config.sql_active_high ? 1U : 0U;
+        if (!append_tlv_with_count(CONFIG_TLV_SQL_ACTIVE_HIGH, buffer1, sizeof(buffer1))) return false;
+
+        buffer1[0] = config.ptt_active_high ? 1U : 0U;
+        if (!append_tlv_with_count(CONFIG_TLV_PTT_ACTIVE_HIGH, buffer1, sizeof(buffer1))) return false;
+    }
+
     payload[item_count_index] = item_count;
     payload_len = offset;
     return true;
 }
 
 bool send_radio_config_packet() {
-    uint8_t payload[96] = {0};
+    uint8_t payload[112] = {0};
     size_t payload_len = 0;
     if (!build_radio_config_payload(payload, sizeof(payload), payload_len)) {
         return false;
@@ -1903,6 +2161,45 @@ bool handle_config_apply_payload(const uint8_t *data, size_t data_len) {
             case CONFIG_TLV_RF_GUARD_MAX_TX_IN_WINDOW_S:
                 if (value_len == 2) {
                     updated.rf_guard_max_tx_in_window_s = read_u16_be(value);
+                    saw_radio_field = true;
+                }
+                break;
+            case CONFIG_TLV_ADC_GAIN:
+                if (value_len != 1 || value[0] > device_config::ADC_GAIN_MAX_DB) {
+                    return false;
+                }
+                updated.adc_gain_db = device_config::normalize_adc_gain_db(value[0]);
+                saw_radio_field = true;
+                break;
+            case CONFIG_TLV_ADC_VOLUME:
+                if (value_len != 1 || value[0] > device_config::AUDIO_VOLUME_MAX) {
+                    return false;
+                }
+                updated.adc_volume = value[0];
+                saw_radio_field = true;
+                break;
+            case CONFIG_TLV_DAC_VOLUME:
+                if (value_len != 1 || value[0] > device_config::AUDIO_VOLUME_MAX) {
+                    return false;
+                }
+                updated.dac_volume = value[0];
+                saw_radio_field = true;
+                break;
+            case CONFIG_TLV_SQL_ACTIVE_HIGH:
+                if (value_len != 1 || value[0] > 1U) {
+                    return false;
+                }
+                if (edit_controller_get_device_model() == DEVICE_MODEL_NO_RF) {
+                    updated.sql_active_high = value[0] != 0;
+                    saw_radio_field = true;
+                }
+                break;
+            case CONFIG_TLV_PTT_ACTIVE_HIGH:
+                if (value_len != 1 || value[0] > 1U) {
+                    return false;
+                }
+                if (edit_controller_get_device_model() == DEVICE_MODEL_NO_RF) {
+                    updated.ptt_active_high = value[0] != 0;
                     saw_radio_field = true;
                 }
                 break;
@@ -2103,13 +2400,11 @@ void maybe_log_audio_stats() {
     const unsigned long loop_stack_hw_bytes =
         static_cast<unsigned long>(uxTaskGetStackHighWaterMark(nullptr)) * sizeof(StackType_t);
 
-    Serial.printf("[NET][AUDIO] p5=%lu p6=%lu bytes=%lu ok=%lu peak=%u max_peak=%u dec_fail=%lu i2s_fail=%lu not_ready=%lu parse_fail=%lu short6=%lu rf_drop=%lu tx_ok=%lu tx_bytes=%lu tx_read_fail=%lu tx_enc_fail=%lu tx_udp_fail=%lu rf_trip_single=%lu rf_trip_duty=%lu rf_overload=%d rf_budget_ms=%.1f stack_hw=%lu\n",
+    Serial.printf("[NET][AUDIO] p5=%lu p6=%lu bytes=%lu ok=%lu dec_fail=%lu i2s_fail=%lu not_ready=%lu parse_fail=%lu short6=%lu rf_drop=%lu tx_ok=%lu tx_bytes=%lu tx_read_fail=%lu tx_enc_fail=%lu tx_udp_fail=%lu rf_trip_single=%lu rf_trip_duty=%lu rf_overload=%d rf_budget_ms=%.1f stack_hw=%lu\n",
                   static_cast<unsigned long>(g_audio_rx_stats.packets_type5),
                   static_cast<unsigned long>(g_audio_rx_stats.packets_type6),
                   static_cast<unsigned long>(g_audio_rx_stats.audio_payload_bytes),
                   static_cast<unsigned long>(g_audio_rx_stats.decoded_frames_ok),
-                  static_cast<unsigned int>(g_audio_rx_stats.last_pcm_peak),
-                  static_cast<unsigned int>(g_audio_rx_stats.max_pcm_peak),
                   static_cast<unsigned long>(g_audio_rx_stats.decode_fail),
                   static_cast<unsigned long>(g_audio_rx_stats.i2s_fail),
                   static_cast<unsigned long>(g_audio_rx_stats.audio_not_ready),
@@ -2154,28 +2449,51 @@ void maybe_capture_and_send_rf_audio() {
         return;
     }
 
-    const size_t stereo_bytes = static_cast<size_t>(OPUS_TX_FRAME_SAMPLES) * 2U * sizeof(int16_t);
+    // 非阻塞累积：每轮主循环把 DMA 里现有的数据取走，攒够一帧再往下走。
+    // 原来用 portMAX_DELAY 一次索要 60 ms 的数据，等于在收信期间按 60 ms
+    // 为单位反复挂起主循环，LVGL 刷新和旋钮输入都会跟着卡。
+    const size_t stereo_bytes = sizeof(g_tx_capture_accum);
     size_t bytes_read = 0;
-    const bool read_ok = i2s_read(g_rt_pcm_work, stereo_bytes, &bytes_read);
-    if (!read_ok || bytes_read < stereo_bytes) {
+    const bool read_ok = i2s_read_timeout(
+        reinterpret_cast<uint8_t *>(g_tx_capture_accum) + g_tx_capture_accum_bytes,
+        stereo_bytes - g_tx_capture_accum_bytes,
+        &bytes_read,
+        0
+    );
+    if (!read_ok) {
         ++g_audio_tx_stats.i2s_read_fail;
         if ((now - g_last_i2s_read_fail_log_at_ms) >= AUDIO_ERROR_LOG_INTERVAL_MS) {
             g_last_i2s_read_fail_log_at_ms = now;
-            Serial.printf("[NET][AUDIO][TX] i2s read failed: ok=%d bytes=%u need=%u\n",
-                          read_ok ? 1 : 0,
-                          static_cast<unsigned int>(bytes_read),
+            Serial.printf("[NET][AUDIO][TX] i2s read failed: pending=%u need=%u\n",
+                          static_cast<unsigned int>(g_tx_capture_accum_bytes),
                           static_cast<unsigned int>(stereo_bytes));
         }
+        // 故意不清累积缓冲：万一驱动在零超时下用非 OK 表示「暂时没数据」，
+        // 清掉就会让这一帧永远攒不满、彻底发不出音频。
+        // 缓冲会在 SQL 关闭时由 reset_tx_audio_merge() 统一清理。
         return;
     }
+
+    g_tx_capture_accum_bytes += bytes_read;
+    if (g_tx_capture_accum_bytes < stereo_bytes) {
+        // 还没攒够一帧，让出主循环，下一轮接着取；已取到的部分不丢弃。
+        return;
+    }
+    g_tx_capture_accum_bytes = 0;
     ++g_audio_tx_stats.frames_read_ok;
+
+    g_tx_capture_active = true;
 
     // Convert interleaved stereo PCM to mono for Opus 16k/1ch.
     for (int i = 0; i < OPUS_TX_FRAME_SAMPLES; ++i) {
-        const int32_t left = static_cast<int32_t>(g_rt_pcm_work[i * 2]);
-        const int32_t right = static_cast<int32_t>(g_rt_pcm_work[i * 2 + 1]);
+        const int32_t left = static_cast<int32_t>(g_tx_capture_accum[i * 2]);
+        const int32_t right = static_cast<int32_t>(g_tx_capture_accum[i * 2 + 1]);
         g_tx_pcm_mono[i] = static_cast<int16_t>((left + right) / 2);
     }
+
+    audio_biquad::chain_process(g_tx_filter, g_tx_pcm_mono, OPUS_TX_FRAME_SAMPLES);
+    // 扩展器必须排在带通之后，否则包络会被带外噪声抬高，门限判断失准。
+    audio_expander::process(g_tx_expander, g_tx_pcm_mono, OPUS_TX_FRAME_SAMPLES);
 
     const int encoded_len = opus_encode(
         g_opus_encoder,
@@ -2284,19 +2602,10 @@ bool decode_and_play_frame(const uint8_t *frame, size_t frame_len) {
     }
 
     // In-place mono->stereo expansion on the shared RT PCM workspace.
-    uint16_t peak = 0;
     for (int i = decoded_samples - 1; i >= 0; --i) {
         const int16_t sample = g_rt_pcm_work[i];
-        const int32_t sample_abs = (sample == INT16_MIN) ? 32768 : std::abs(static_cast<int>(sample));
-        if (sample_abs > peak) {
-            peak = static_cast<uint16_t>(sample_abs);
-        }
         g_rt_pcm_work[i * 2] = sample;
         g_rt_pcm_work[i * 2 + 1] = sample;
-    }
-    g_audio_rx_stats.last_pcm_peak = peak;
-    if (peak > g_audio_rx_stats.max_pcm_peak) {
-        g_audio_rx_stats.max_pcm_peak = peak;
     }
 
     size_t written = 0;
@@ -2407,12 +2716,6 @@ void process_udp_packet(const uint8_t *packet, size_t packet_len) {
     if (header.type == TYPE_OPUS_16K) {
         ++g_audio_rx_stats.packets_type5;
         g_audio_rx_stats.audio_payload_bytes += static_cast<uint32_t>(data_len);
-        if (NET_TO_RF_DEBUG_LOG_ENABLED &&
-            (g_audio_rx_stats.packets_type5 <= 5 || (g_audio_rx_stats.packets_type5 % 50U) == 0U)) {
-            Serial.printf("[NET][AUDIO][RXPKT] type=5 data_len=%u state=%s\n",
-                          static_cast<unsigned int>(data_len),
-                          state_name(g_state));
-        }
         edit_controller_set_network_bridge_source(header.call_sign, header.ssid);
         decode_and_play_payload(data, data_len);
         return;
@@ -2421,13 +2724,6 @@ void process_udp_packet(const uint8_t *packet, size_t packet_len) {
     if (header.type == TYPE_SERVER_VOICE) {
         ++g_audio_rx_stats.packets_type6;
         edit_controller_set_network_bridge_source(header.call_sign, header.ssid);
-        if (NET_TO_RF_DEBUG_LOG_ENABLED &&
-            (g_audio_rx_stats.packets_type6 <= 5 || (g_audio_rx_stats.packets_type6 % 50U) == 0U)) {
-            Serial.printf("[NET][AUDIO][RXPKT] type=6 data_len=%u payload_len=%u state=%s\n",
-                          static_cast<unsigned int>(data_len),
-                          static_cast<unsigned int>((data_len > 68) ? (data_len - 68) : 0),
-                          state_name(g_state));
-        }
         if (data_len > 68) {
             g_audio_rx_stats.audio_payload_bytes += static_cast<uint32_t>(data_len - 68);
             decode_and_play_payload(data + 68, data_len - 68);
@@ -2455,14 +2751,20 @@ void poll_udp_packets() {
         return;
     }
 
-    int packet_size = g_udp.parsePacket();
-    while (packet_size > 0) {
+    // 每轮主循环最多处理这么多包。每个语音包都要 opus_decode + i2s_write，
+    // 原来的无界 while 在丢包重传或异常流量下会把主循环长时间钉死，
+    // 严重时触发看门狗。剩余的包留在 socket 里，下一轮继续取。
+    for (uint8_t handled = 0; handled < UDP_MAX_PACKETS_PER_POLL; ++handled) {
+        const int packet_size = g_udp.parsePacket();
+        if (packet_size <= 0) {
+            return;
+        }
+
         const IPAddress remote_ip = g_udp.remoteIP();
         const uint16_t remote_port = g_udp.remotePort();
 
         if (packet_size > static_cast<int>(DRA_MAX_PACKET_SIZE)) {
             flush_large_udp_packet(packet_size);
-            packet_size = g_udp.parsePacket();
             continue;
         }
 
@@ -2470,8 +2772,6 @@ void poll_udp_packets() {
         if (read_len > 0 && remote_ip == g_server_ip && remote_port == g_server_port) {
             process_udp_packet(g_rt_packet_buffer, static_cast<size_t>(read_len));
         }
-
-        packet_size = g_udp.parsePacket();
     }
 }
 
@@ -2491,6 +2791,10 @@ void update_state_machine() {
         stop_voice_bridge();
         close_udp_session();
         if (g_state != LinkState::WAIT_WIFI) {
+            if (g_ap_probe_running) {
+                access_point::probe_abort();
+                g_ap_probe_running = false;
+            }
             enter_state(LinkState::WAIT_WIFI, 500);
         }
         return;
@@ -2536,7 +2840,7 @@ void update_state_machine() {
             switch (perform_precheck()) {
                 case PrecheckResult::AUTHENTICATED:
                     hide_bind_popup();
-                    enter_state(LinkState::RESOLVE_SERVER, 0);
+                    enter_state(state_after_credentials_ready(), 0);
                     break;
                 case PrecheckResult::NEED_BIND:
                     enter_state(LinkState::REQUEST_CODE, 0);
@@ -2567,7 +2871,7 @@ void update_state_machine() {
 
             switch (perform_confirm_bind()) {
                 case ConfirmBindResult::READY:
-                    enter_state(LinkState::RESOLVE_SERVER, 0);
+                    enter_state(state_after_credentials_ready(), 0);
                     break;
                 case ConfirmBindResult::WAITING:
                     enter_state(LinkState::CONFIRM_BIND, BIND_POLL_MS);
@@ -2579,6 +2883,24 @@ void update_state_machine() {
                 default:
                     enter_state(LinkState::CONFIRM_BIND, HTTP_RETRY_MS);
                     break;
+            }
+            break;
+
+        case LinkState::DISCOVER_FETCH:
+            if (begin_access_point_discovery()) {
+                enter_state(LinkState::DISCOVER_PROBE, 0);
+            } else {
+                fall_back_to_known_access_point();
+                enter_state(LinkState::RESOLVE_SERVER, 0);
+            }
+            break;
+
+        case LinkState::DISCOVER_PROBE:
+            if (step_access_point_probe()) {
+                finish_access_point_discovery();
+                enter_state(LinkState::RESOLVE_SERVER, 0);
+            } else {
+                enter_state(LinkState::DISCOVER_PROBE, DISCOVER_POLL_MS);
             }
             break;
 
@@ -2648,14 +2970,13 @@ bool init_audio_chain() {
             es8388_set_adc_input(ES8388Input::INPUT1);
             // ROUT1 belongs to the OUT1 output pair.
             es8388_set_dac_output(ES8388Output::OUT1);
-            es8388_set_adc_gain(12);
-            es8388_set_adc_volume(100);
-            es8388_set_dac_volume(100);
+            es8388_set_adc_gain(g_audio_codec_config.adc_gain_db);
+            es8388_set_adc_volume(g_audio_codec_config.adc_volume);
+            es8388_set_dac_volume(g_audio_codec_config.dac_volume);
             es8388_enable_adc(true);
             es8388_enable_dac(true);
             es8388_set_dac_mute(false);
             es8388_set_adc_mute(false);
-            g_rf_capture_adc_muted = false;
         }
     }
 
@@ -2665,6 +2986,8 @@ bool init_audio_chain() {
         i2s_set_mute(false);
         i2s_set_volume(100);
     }
+
+    setup_tx_audio_filter();
 
     int enc_error = OPUS_OK;
     int dec_error = OPUS_OK;
@@ -2713,6 +3036,10 @@ bool net_audio_link_init() {
 
     device_config::set_defaults(g_config);
     device_config::load(g_config);
+    access_point::reset(g_active_ap);
+    if (!access_point::load_cached(g_active_ap)) {
+        access_point::fallback_endpoint(g_active_ap);
+    }
     g_rf_guard_cfg = read_rf_guard_config_from_runtime();
     g_rf_guard_budget_ms = rf_guard_budget_capacity_ms(g_rf_guard_cfg);
     g_rf_guard_last_refill_at_ms = millis();
@@ -2725,6 +3052,8 @@ bool net_audio_link_init() {
     g_rf_guard_trip_duty_count = 0;
     g_rf_guard_last_trip_reason = "none";
     set_rf_guard_overload_state(false);
+    g_audio_codec_config = read_audio_codec_config_from_runtime();
+    g_audio_codec_config_initialized = true;
 
     g_audio_ready = init_audio_chain();
     g_initialized = true;
@@ -2745,6 +3074,7 @@ void net_audio_link_update() {
     if (!g_initialized) {
         return;
     }
+    update_audio_codec_runtime_config();
     update_state_machine();
 }
 
@@ -2758,4 +3088,13 @@ void net_audio_link_hide_bind_popup() {
 
 bool net_audio_link_is_bind_popup_visible() {
     return g_bind_popup_visible;
+}
+
+bool net_audio_link_get_access_point(access_point::Endpoint &out) {
+    if (!access_point::is_usable(g_active_ap)) {
+        access_point::reset(out);
+        return false;
+    }
+    out = g_active_ap;
+    return true;
 }

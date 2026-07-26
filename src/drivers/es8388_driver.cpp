@@ -1,10 +1,13 @@
 #include "es8388_driver.h"
-#include "i2s_driver.h"
 #include "i2c_driver.h"
 
 namespace {
-uint8_t current_dac_volume = 50;
-uint8_t current_adc_volume = 50;
+constexpr uint8_t ES8388_DEFAULT_ADC_GAIN_DB = 18;
+constexpr uint8_t ES8388_DEFAULT_ADC_VOLUME = 100;
+constexpr uint8_t ES8388_DEFAULT_DAC_VOLUME = 80;
+
+uint8_t current_dac_volume = ES8388_DEFAULT_DAC_VOLUME;
+uint8_t current_adc_volume = ES8388_DEFAULT_ADC_VOLUME;
 ES8388Output current_dac_output = ES8388Output::OUT1;
 uint8_t active_es8388_addr = ES8388_ADDR;
 constexpr uint8_t ES8388_ADDR_ALT = 0x11;
@@ -53,10 +56,14 @@ constexpr uint8_t ES8388_I2S_FORMAT_MASK = 0x00;
 constexpr uint8_t ES8388_LEFT_FORMAT_MASK = 0x01;
 constexpr uint8_t ES8388_RIGHT_FORMAT_MASK = 0x02;
 constexpr uint8_t ES8388_DSP_FORMAT_MASK = 0x03;
-constexpr uint8_t ES8388_MCLK_DIV_1024 = 0x07;
+constexpr uint8_t ES8388_MCLK_DIV_256 = 0x02;
 constexpr uint8_t ES8388_ANALOG_0DB = 0x1E;
 
-static_assert(I2S_MCLK_MULTIPLIER == 1024U, "ES8388 MCLK/LRCK register must match I2S_MCLK_MULTIPLIER.");
+// 注意：REG_ADC_CONTROL7（Reg 15）这里写的 0x30/0x34 多置了一个 bit4，
+// 而手册该寄存器只定义了 7:6 ADCRampRate、5 ADCSoftRamp、3 ADCLeR、2 ADCMute，
+// 复位默认值是 0x20。按手册应为 0x20/0x24。
+// 但当前 0x30 的写法在实机上是能正常采集的，改动无法离线验证，
+// 因此暂不修改；等有设备可以回归测试时再对齐手册。
 
 bool write_reg(uint8_t reg, uint8_t value) {
     const bool ok = i2c_write_byte(active_es8388_addr, reg, value);
@@ -211,9 +218,9 @@ bool es8388_init(void) {
     es8388_set_sample_rate(ES8388SampleRate::RATE_16K);
     es8388_set_adc_input(ES8388Input::INPUT1);
     es8388_set_dac_output(ES8388Output::OUT1);
-    es8388_set_adc_volume(100);
-    es8388_set_dac_volume(100);
-    es8388_set_adc_gain(12);
+    es8388_set_adc_volume(ES8388_DEFAULT_ADC_VOLUME);
+    es8388_set_dac_volume(ES8388_DEFAULT_DAC_VOLUME);
+    es8388_set_adc_gain(ES8388_DEFAULT_ADC_GAIN_DB);
     es8388_set_adc_mute(false);
     es8388_set_dac_mute(false);
 
@@ -236,8 +243,8 @@ void es8388_set_format(ES8388Format format) {
 
 void es8388_set_sample_rate(ES8388SampleRate rate) {
     (void)rate;
-    write_reg(REG_ADC_CONTROL5, ES8388_MCLK_DIV_1024);
-    write_reg(REG_DAC_CONTROL2, ES8388_MCLK_DIV_1024);
+    write_reg(REG_ADC_CONTROL5, ES8388_MCLK_DIV_256);
+    write_reg(REG_DAC_CONTROL2, ES8388_MCLK_DIV_256);
     write_reg(REG_DAC_CONTROL21, 0x80);
 }
 
@@ -266,7 +273,8 @@ void es8388_set_adc_gain(uint8_t gain_db) {
     if (gain_db > 24) {
         gain_db = 24;
     }
-    write_reg(REG_ADC_CONTROL1, static_cast<uint8_t>(gain_db / 3));
+    const uint8_t gain_step = static_cast<uint8_t>((gain_db + 1U) / 3U);
+    write_reg(REG_ADC_CONTROL1, static_cast<uint8_t>((gain_step << 4) | gain_step));
 }
 
 void es8388_enable_adc(bool enable) {

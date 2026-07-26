@@ -50,6 +50,10 @@ void sa818_start_tx(void);
 void sa818_stop_tx(void);
 bool sa818_is_tx(void);
 bool sa818_is_rx(void);
+void sa818_set_sql_active_high(bool active_high);
+bool sa818_get_sql_active_high(void);
+void sa818_set_ptt_active_high(bool active_high);
+bool sa818_get_ptt_active_high(void);
 
 // ==================== 频率配置 ====================
 

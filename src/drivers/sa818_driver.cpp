@@ -16,6 +16,8 @@ static bool is_wide_band = false;
 static bool is_tx = false;
 static bool is_enabled = false;
 static bool module_present = false;
+static bool sql_active_high = false;
+static bool ptt_active_high = false;
 
 // 频率配置
 static uint32_t tx_freq = 433500;
@@ -318,12 +320,13 @@ bool sa818_init(SA818Type type) {
     pinMode(SA818_EN, OUTPUT);
     digitalWrite(SA818_EN, 0);  // LOW
 
-    // SA818_SQL: 外部上拉, 低电平为正在接收
+    // SQL is driven push-pull by the module; polarity is board-configurable.
     pinMode(SA818_SQL, INPUT);
 
-    // SA818_PTT: 外部上拉, 低电平为控制发射
+    // PTT is driven push-pull by the ESP32; start in the inactive state.
     pinMode(SA818_PTT, OUTPUT);
-    digitalWrite(SA818_PTT, 1);  // HIGH - 默认不发射
+    digitalWrite(SA818_PTT, ptt_active_high ? LOW : HIGH);
+    is_tx = false;
 
     // SA818_PW: 低电平低功率, 高阻态高功率
     // 使用开漏模式实现高阻态，并复用当前运行态的功率设置。
@@ -380,16 +383,14 @@ SA818Power sa818_get_power(void) {
 
 void sa818_start_tx(void) {
     if (!is_tx) {
-        digitalWrite(SA818_PTT, 0);  // LOW
+        digitalWrite(SA818_PTT, ptt_active_high ? HIGH : LOW);
         is_tx = true;
     }
 }
 
 void sa818_stop_tx(void) {
-    if (is_tx) {
-        digitalWrite(SA818_PTT, 1);  // HIGH
-        is_tx = false;
-    }
+    digitalWrite(SA818_PTT, ptt_active_high ? LOW : HIGH);
+    is_tx = false;
 }
 
 bool sa818_is_tx(void) {
@@ -397,7 +398,29 @@ bool sa818_is_tx(void) {
 }
 
 bool sa818_is_rx(void) {
-    return digitalRead(SA818_SQL) == 0;  // LOW
+    return digitalRead(SA818_SQL) == (sql_active_high ? HIGH : LOW);
+}
+
+void sa818_set_sql_active_high(bool active_high) {
+    sql_active_high = active_high;
+    pinMode(SA818_SQL, INPUT);
+}
+
+bool sa818_get_sql_active_high(void) {
+    return sql_active_high;
+}
+
+void sa818_set_ptt_active_high(bool active_high) {
+    ptt_active_high = active_high;
+    pinMode(SA818_PTT, OUTPUT);
+    const uint8_t level = is_tx
+        ? (ptt_active_high ? HIGH : LOW)
+        : (ptt_active_high ? LOW : HIGH);
+    digitalWrite(SA818_PTT, level);
+}
+
+bool sa818_get_ptt_active_high(void) {
+    return ptt_active_high;
 }
 
 bool sa818_set_tx_frequency(uint32_t freq_khz) {

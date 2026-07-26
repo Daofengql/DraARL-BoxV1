@@ -11,7 +11,6 @@ namespace device_config {
 constexpr size_t WIFI_SSID_MAX_LEN = 32;
 constexpr size_t WIFI_PASSWORD_MAX_LEN = 64;
 constexpr size_t IPV4_TEXT_MAX_LEN = 15;
-constexpr size_t HOST_MAX_LEN = 63;
 constexpr size_t URL_MAX_LEN = 127;
 constexpr size_t ACCOUNT_MAX_LEN = 31;
 constexpr size_t PASSWORD_MAX_LEN = 63;
@@ -31,6 +30,14 @@ constexpr bool RF_GUARD_ENABLED_DEFAULT = true;
 constexpr uint16_t RF_GUARD_SINGLE_TX_LIMIT_DEFAULT_S = 30;
 constexpr uint16_t RF_GUARD_WINDOW_DEFAULT_S = 300;
 constexpr uint16_t RF_GUARD_MAX_TX_IN_WINDOW_DEFAULT_S = 60;
+constexpr uint8_t ADC_GAIN_MAX_DB = 24;
+constexpr uint8_t ADC_GAIN_STEP_DB = 3;
+constexpr uint8_t ADC_GAIN_DEFAULT_DB = 18;
+constexpr uint8_t AUDIO_VOLUME_MAX = 100;
+constexpr uint8_t ADC_VOLUME_DEFAULT = 100;
+constexpr uint8_t DAC_VOLUME_DEFAULT = 80;
+constexpr bool SQL_ACTIVE_HIGH_DEFAULT = false;
+constexpr bool PTT_ACTIVE_HIGH_DEFAULT = false;
 
 enum class SubAudioType : uint8_t {
     OFF = 0,
@@ -67,14 +74,17 @@ struct RadioConfig {
     uint16_t rf_guard_single_tx_limit_s;
     uint16_t rf_guard_window_s;
     uint16_t rf_guard_max_tx_in_window_s;
+    uint8_t adc_gain_db;
+    uint8_t adc_volume;
+    uint8_t dac_volume;
+    bool sql_active_high;
+    bool ptt_active_high;
 };
 
 struct ServerConfig {
     char callsign[CALLSIGN_MAX_LEN + 1];
     uint8_t node_ssid;
     uint32_t dmr_id;
-    char udp_host[HOST_MAX_LEN + 1];
-    uint16_t udp_port;
     char http_api_base_url[URL_MAX_LEN + 1];
     char account[ACCOUNT_MAX_LEN + 1];
     char device_auth_password[PASSWORD_MAX_LEN + 1];
@@ -118,6 +128,7 @@ bool is_default_or_legacy_server_http_api_base(const char *base_url);
 
 bool has_wifi_credentials(const WiFiConfig &config);
 bool is_valid_device_node_ssid(uint8_t ssid);
+uint8_t normalize_adc_gain_db(uint8_t gain_db);
 uint8_t sanitize_backlight_pwm(uint8_t pwm);
 uint8_t load_backlight_pwm();
 bool save_backlight_pwm(uint8_t pwm);

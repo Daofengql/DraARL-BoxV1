@@ -390,7 +390,7 @@
         <div class="panel-head">
           <div class="panel-copy">
             <h2>DraARL</h2>
-            <p>填写中继节点的网络与设备认证信息。</p>
+            <p>填写 HTTP API 地址与设备认证信息，UDP 接入点由服务端自动下发。</p>
           </div>
           <div class="panel-actions">
             <mdui-button id="saveServerBtn" variant="filled">保存 DraARL 配置</mdui-button>
@@ -400,8 +400,6 @@
         <div class="field-grid">
           <mdui-text-field id="serverCallsign" label="Callsign" placeholder="BH5UVN"></mdui-text-field>
           <mdui-text-field id="serverSsid" type="number" min="0" max="15" label="SSID" placeholder="0"></mdui-text-field>
-          <mdui-text-field id="serverUdpHost" label="UDP Host" placeholder="example.com"></mdui-text-field>
-          <mdui-text-field id="serverUdpPort" type="number" min="0" max="65535" label="UDP Port" placeholder="3000"></mdui-text-field>
         </div>
 
         <div class="field-grid">
@@ -409,6 +407,8 @@
           <mdui-text-field id="serverAccount" label="账号" placeholder="account"></mdui-text-field>
           <mdui-text-field id="serverDevicePassword" type="password" label="设备认证密码" placeholder="device password"></mdui-text-field>
         </div>
+
+        <p class="helper-text" style="margin-top:14px;">当前接入点：<span id="serverAccessPoint">未选择</span></p>
       </mdui-card>
     </main>
 
@@ -839,11 +839,26 @@
     function fillServer(data) {
       setFieldValue("serverCallsign", data.callsign || "");
       setFieldValue("serverSsid", data.node_ssid ?? 0);
-      setFieldValue("serverUdpHost", data.udp_host || "");
-      setFieldValue("serverUdpPort", data.udp_port || "");
       setFieldValue("serverHttpBase", data.http_api_base_url || "");
       setFieldValue("serverAccount", data.account || "");
       setFieldValue("serverDevicePassword", data.device_auth_password || "");
+      renderAccessPoint(data.access_point);
+    }
+
+    function renderAccessPoint(accessPoint) {
+      const target = document.getElementById("serverAccessPoint");
+      if (!target) return;
+
+      if (!accessPoint || !accessPoint.udp_host) {
+        target.textContent = "未选择（联网后由服务端下发）";
+        return;
+      }
+
+      const parts = [`${accessPoint.udp_host}:${accessPoint.udp_port}`];
+      if (accessPoint.display_name) parts.push(accessPoint.display_name);
+      if (accessPoint.region) parts.push(accessPoint.region);
+      if (accessPoint.rtt_ms !== undefined) parts.push(`${accessPoint.rtt_ms} ms`);
+      target.textContent = parts.join(" · ");
     }
 
     function renderSsidOptions(networks) {
@@ -927,8 +942,6 @@
       return {
         callsign: getFieldValue("serverCallsign").trim(),
         node_ssid: Number(getFieldValue("serverSsid") || 0),
-        udp_host: getFieldValue("serverUdpHost").trim(),
-        udp_port: Number(getFieldValue("serverUdpPort") || 0),
         http_api_base_url: getFieldValue("serverHttpBase").trim(),
         account: getFieldValue("serverAccount").trim(),
         device_auth_password: getFieldValue("serverDevicePassword")

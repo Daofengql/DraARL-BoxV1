@@ -564,7 +564,7 @@ void update_startup_sequence(uint32_t now_ms) {
                               ? config.server.http_api_base_url
                               : "<empty>",
                           FIRMWARE_VERSION,
-                          DEVICE_MODEL);
+                          edit_controller_get_device_model());
 
             // 如果之前检查过有更新，显示图标
             if (ota_config_cache.has_pending_update) {

@@ -28,8 +28,6 @@
 #include "../ui/ui.h"
 #include "access_point_discovery.h"
 #include "app_logic.h"
-#include "audio_biquad.h"
-#include "audio_expander.h"
 #include "connectivity_manager.h"
 #include "device_config.h"
 #include "edit_controller.h"
@@ -286,12 +284,6 @@ bool g_rf_capture_adc_muted = false;
 uint8_t g_rt_packet_buffer[DRA_MAX_PACKET_SIZE] = {0};
 int16_t g_rt_pcm_work[RT_PCM_WORK_SAMPLES] = {0};
 int16_t g_tx_pcm_mono[OPUS_TX_FRAME_SAMPLES] = {0};
-// 采集侧滤波：FM 语音带通 + 压掉 ES8388 ADC 上那个恒定的 ~266 Hz 底噪，
-// 再用向下扩展器压低弱信号时暴露出来的本底。
-audio_biquad::Chain g_tx_filter = {};
-audio_expander::State g_tx_expander = {};
-// 采集是按 SQL 断续进行的，中断后重新开始要清一次滤波器和包络历史。
-bool g_tx_capture_active = false;
 // 采集帧累积缓冲：i2s 用零超时轮询，不足一帧的部分留到下一轮主循环。
 int16_t g_tx_capture_accum[OPUS_TX_FRAME_SAMPLES * 2] = {0};
 size_t g_tx_capture_accum_bytes = 0;
@@ -1431,57 +1423,10 @@ void check_voice_timeout() {
     }
 }
 
-// 陷波放在最前，再接带通的高低端；LTI 级联顺序不影响幅频响应，
-// 这样排只是让日志和调试时的意图更直观。
-void setup_tx_audio_filter() {
-    constexpr float fs = static_cast<float>(OPUS_SAMPLE_RATE);
-    audio_biquad::chain_clear(g_tx_filter);
-
-#if TX_NOTCH_ENABLED
-    if (!audio_biquad::chain_add_notch(g_tx_filter, fs, TX_NOTCH_CENTER_HZ, TX_NOTCH_Q)) {
-        Serial.printf("[NET][AUDIO][TX] notch %.0fHz rejected\n",
-                      static_cast<double>(TX_NOTCH_CENTER_HZ));
-    }
-#endif
-#if TX_BANDPASS_ENABLED
-    if (!audio_biquad::chain_add_highpass4(g_tx_filter, fs, TX_BANDPASS_LOW_HZ) ||
-        !audio_biquad::chain_add_lowpass4(g_tx_filter, fs, TX_BANDPASS_HIGH_HZ)) {
-        Serial.printf("[NET][AUDIO][TX] bandpass %.0f-%.0fHz rejected\n",
-                      static_cast<double>(TX_BANDPASS_LOW_HZ),
-                      static_cast<double>(TX_BANDPASS_HIGH_HZ));
-    }
-#endif
-
-    Serial.printf("[NET][AUDIO][TX] capture filter sections=%u\n",
-                  static_cast<unsigned int>(g_tx_filter.count));
-
-#if TX_EXPANDER_ENABLED
-    if (audio_expander::configure(g_tx_expander,
-                                  fs,
-                                  TX_EXPANDER_THRESHOLD_DBFS,
-                                  TX_EXPANDER_MAX_ATTEN_DB,
-                                  TX_EXPANDER_ATTACK_MS,
-                                  TX_EXPANDER_RELEASE_MS)) {
-        Serial.printf("[NET][AUDIO][TX] expander th=%.0fdBFS max=%.0fdB\n",
-                      static_cast<double>(TX_EXPANDER_THRESHOLD_DBFS),
-                      static_cast<double>(TX_EXPANDER_MAX_ATTEN_DB));
-    } else {
-        Serial.println("[NET][AUDIO][TX] expander rejected, bypassed");
-    }
-#else
-    audio_expander::disable(g_tx_expander);
-#endif
-}
-
 void reset_tx_audio_merge() {
     g_tx_merged_payload_len = 0;
     g_tx_merged_frame_count = 0;
     g_tx_capture_accum_bytes = 0;
-    if (g_tx_capture_active) {
-        g_tx_capture_active = false;
-        audio_biquad::chain_reset(g_tx_filter);
-        audio_expander::reset(g_tx_expander);
-    }
 }
 
 void close_udp_session() {
@@ -2482,18 +2427,12 @@ void maybe_capture_and_send_rf_audio() {
     g_tx_capture_accum_bytes = 0;
     ++g_audio_tx_stats.frames_read_ok;
 
-    g_tx_capture_active = true;
-
     // Convert interleaved stereo PCM to mono for Opus 16k/1ch.
     for (int i = 0; i < OPUS_TX_FRAME_SAMPLES; ++i) {
         const int32_t left = static_cast<int32_t>(g_tx_capture_accum[i * 2]);
         const int32_t right = static_cast<int32_t>(g_tx_capture_accum[i * 2 + 1]);
         g_tx_pcm_mono[i] = static_cast<int16_t>((left + right) / 2);
     }
-
-    audio_biquad::chain_process(g_tx_filter, g_tx_pcm_mono, OPUS_TX_FRAME_SAMPLES);
-    // 扩展器必须排在带通之后，否则包络会被带外噪声抬高，门限判断失准。
-    audio_expander::process(g_tx_expander, g_tx_pcm_mono, OPUS_TX_FRAME_SAMPLES);
 
     const int encoded_len = opus_encode(
         g_opus_encoder,
@@ -2986,8 +2925,6 @@ bool init_audio_chain() {
         i2s_set_mute(false);
         i2s_set_volume(100);
     }
-
-    setup_tx_audio_filter();
 
     int enc_error = OPUS_OK;
     int dec_error = OPUS_OK;

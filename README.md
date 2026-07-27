@@ -126,7 +126,6 @@
 | [`src/logic/connectivity_manager.cpp`](src/logic/connectivity_manager.cpp) | Wi-Fi 状态机、BLE GATT、动态码认证、BLE RPC 配置 |
 | [`src/logic/net_audio_link.cpp`](src/logic/net_audio_link.cpp) | DraARL HTTP/UDP 状态机、绑定、鉴权、心跳、配置同步、语音桥接、RF Guard |
 | [`src/logic/access_point_discovery.cpp`](src/logic/access_point_discovery.cpp) | 入口发现：拉取服务端 UDP 接入点列表、ICMP 测速择优、结果缓存 |
-| [`src/logic/audio_biquad.cpp`](src/logic/audio_biquad.cpp) | 二阶 IIR 节与级联，用于采集侧的语音带通和窄带陷波 |
 | [`src/logic/device_config.cpp`](src/logic/device_config.cpp) | Wi-Fi、Radio、Server、OTA、本地 UI 配置的默认值、校验和 NVS 读写 |
 | [`src/logic/ota_update.cpp`](src/logic/ota_update.cpp) | 固件版本检查、下载、哈希校验、写入 OTA 分区 |
 | [`src/drivers/sa818_driver.cpp`](src/drivers/sa818_driver.cpp) | SA818 AT 指令封装、频率/亚音/静噪/带宽/功率/PTT 控制 |
@@ -293,21 +292,8 @@ WAIT_WIFI -> PRECHECK -> REQUEST_CODE / CONFIRM_BIND -> DISCOVER_FETCH -> DISCOV
 
 网络下行语音可触发本地 RF PTT 并桥接到 SA818；本地音频可编码为 Opus 后通过 DraARL UDP 发送。
 
-### 采集侧滤波
-
-ES8388 采到的 PCM 在 Opus 编码前会过一条 IIR 级联（[`src/logic/audio_biquad.cpp`](src/logic/audio_biquad.cpp)），
-参数集中在 [`src/config.h`](src/config.h)：
-
-| 环节 | 默认值 | 说明 |
-| --- | --- | --- |
-| 陷波 | `266 Hz`，`Q=3` | 压掉 ADC 链路上的恒定底噪（疑似板级模拟耦合） |
-| 高通 | `300 Hz`，四阶 Butterworth | 滤掉工频/低频隆隆声 |
-| 低通 | `3800 Hz`，四阶 Butterworth | 限制在 FM 语音带，高端比常规 3 kHz 略放宽 |
-
-实测通带 `400-3400 Hz` 起伏在 1 dB 以内，`100 Hz` 处 -38 dB，`5500 Hz` 处 -24 dB。
-底噪频率若与 `266 Hz` 有偏差，改 `TX_NOTCH_CENTER_HZ` 重新编译即可；
-`Q` 越大陷波越窄，也越容易因为频率漂移而漏掉。滤波器状态在 SQL 中断、
-采集重新开始时清零，避免残留状态引入瞬态。
+采集侧不做任何软件滤波：曾经试过 266 Hz 陷波加语音带通，实测压掉那个单音之后
+其余噪声反而更突出，整体听感变差，已经移除。
 
 ## BLE 配置
 

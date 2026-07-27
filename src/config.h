@@ -4,7 +4,7 @@
 // ===================================================================
 //                       固件版本
 // ===================================================================
-#define FIRMWARE_VERSION "0.0.10"
+#define FIRMWARE_VERSION "0.0.11"
 #define DEVICE_MODEL_RF 1
 #define DEVICE_MODEL_NO_RF 2
 #define DEVICE_MODEL DEVICE_MODEL_RF
@@ -62,36 +62,6 @@
 // ===================================================================
 #define NET_TX          48      // 网络发送
 #define NET_RX          45      // 网络接收
-
-// ===================================================================
-//                       采集侧语音滤波
-// ===================================================================
-// 在 Opus 编码前对 ES8388 采到的 PCM 做带通，只保留 FM 语音带。
-// 高低端各用四阶 Butterworth（24 dB/oct）。高端比常规 3 kHz 放宽一些，
-// 保留齿音让人声更自然；16 kHz 采样下 Nyquist 为 8 kHz，留有充足余量。
-#define TX_BANDPASS_ENABLED     1
-#define TX_BANDPASS_LOW_HZ      300.0f
-#define TX_BANDPASS_HIGH_HZ     3800.0f
-
-// ES8388 ADC 采集链路上还有一个约 266 Hz 的恒定底噪（疑似板级模拟耦合）。
-// 它正好压在带通的下转角上，光靠高通滚降只能压掉约 10 dB，
-// 所以额外挂一节陷波专门对付它。若实测频率有偏差，改中心频率重新编译即可；
-// Q 越大陷波越窄，越容易因为频率漂移而漏掉。
-#define TX_NOTCH_ENABLED        1
-#define TX_NOTCH_CENTER_HZ      266.0f
-#define TX_NOTCH_Q              3.0f
-
-// 向下扩展器：压低弱信号时暴露出来的恒定本底噪声（陷波只能除掉 266 Hz
-// 那个单音，FM 弱信号的宽带嘶声要靠这里）。门限以下按 2:1 压低增益。
-// 它不是噪声门——衰减量硬顶在 MAX_ATTEN_DB，绝不会静音，
-// 所以即使门限偏高误判成语音，最坏也只是那段轻一些，不会消失。
-// 起控 2 ms 保证不吃音头，释放 250 ms 避免呼吸感。
-// 调优：底噪听不出改善就把门限往上抬（如 -40），语音发闷就往下压（如 -50）。
-#define TX_EXPANDER_ENABLED     1
-#define TX_EXPANDER_THRESHOLD_DBFS  -45.0f
-#define TX_EXPANDER_MAX_ATTEN_DB    -18.0f
-#define TX_EXPANDER_ATTACK_MS       2.0f
-#define TX_EXPANDER_RELEASE_MS      250.0f
 
 // ===================================================================
 //                       SA818 射频模块配置

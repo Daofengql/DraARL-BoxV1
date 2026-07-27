@@ -32,6 +32,7 @@ extern "C" {
 #include "ui_SettingPAGE.h"
 #include "ui_InfoPage.h"
 #include "ui_RFPAGE.h"
+#include "ui_Standby.h"
 
 ///////////////////// VARIABLES ////////////////////
 

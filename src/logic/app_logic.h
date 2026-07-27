@@ -5,6 +5,7 @@
 
 void app_logic_init();
 void app_logic_update();
+bool app_logic_should_refresh_display();
 void app_logic_set_time_from_server_ms(int64_t unix_ms);
 void app_logic_on_ptt_prepare();
 void app_logic_on_ptt_started();

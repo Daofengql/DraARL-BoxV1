@@ -69,6 +69,7 @@ constexpr uint32_t DYNAMIC_CODE_REFRESH_MS = 55000;
 constexpr uint32_t REQUEST_CODE_RETRY_MS = 60000;
 constexpr uint32_t RESOLVE_RETRY_MS = 3000;
 constexpr uint32_t DISCOVER_POLL_MS = 50;
+constexpr uint32_t ACTIVE_AP_RTT_REFRESH_MS = 5000;
 // 每轮主循环处理的 UDP 包上限。语音是 2 帧/包、120 ms/包，
 // 取 8 相当于单轮最多消化约 1 秒的积压，足够吸收抖动又不会长时间占用主循环。
 constexpr uint8_t UDP_MAX_PACKETS_PER_POLL = 8;
@@ -240,9 +241,11 @@ size_t g_ap_candidate_count = 0;
 size_t g_ap_probe_index = 0;
 bool g_ap_probe_running = false;
 access_point::Endpoint g_active_ap = {};
-// 本次开机已选定入口。选定后运行期间不再重测、不再切换，
+// 本次开机已选定入口。运行期间只刷新 RTT，不重新选择节点；
 // 下次重启才会重新拉列表并做 ICMP 择优。
 bool g_ap_selected_this_boot = false;
+bool g_active_ap_rtt_probe_running = false;
+uint32_t g_next_active_ap_rtt_probe_at_ms = 0;
 
 OpusEncoder *g_opus_encoder = nullptr;
 OpusDecoder *g_opus_decoder = nullptr;
@@ -1041,6 +1044,32 @@ void refresh_server_status_widgets() {
             lv_obj_add_flag(ui_configsync, LV_OBJ_FLAG_HIDDEN);
         }
     }
+    if (ui_nodeLatency) {
+        const char *id = g_active_ap.id[0] != '\0' ? g_active_ap.id : "--";
+        char text[80] = {};
+        if (!access_point::is_usable(g_active_ap) || g_active_ap.rtt_ms == access_point::RTT_UNKNOWN) {
+            snprintf(text, sizeof(text), "AP %s : #8B98A5 --ms#", id);
+        } else {
+            const char *color = g_active_ap.rtt_ms <= 80
+                                    ? "4ADE80"
+                                    : (g_active_ap.rtt_ms <= 180 ? "FACC15" : "FF5A5F");
+            snprintf(text,
+                     sizeof(text),
+                     "AP %s : #%s %ums#",
+                     id,
+                     color,
+                     static_cast<unsigned int>(g_active_ap.rtt_ms));
+        }
+        lv_label_set_text(ui_nodeLatency, text);
+    }
+}
+
+void stop_active_ap_rtt_probe() {
+    if (!g_active_ap_rtt_probe_running) {
+        return;
+    }
+    access_point::probe_abort();
+    g_active_ap_rtt_probe_running = false;
 }
 
 void write_padded_field(uint8_t *dest, size_t field_len, const char *src) {
@@ -1070,8 +1099,14 @@ const char *state_name(LinkState state) {
 }
 
 void enter_state(LinkState state, uint32_t delay_ms = 0) {
+    if (g_state == LinkState::RUNNING && state != LinkState::RUNNING) {
+        stop_active_ap_rtt_probe();
+    }
     g_state = state;
     g_next_action_at_ms = millis() + delay_ms;
+    if (state == LinkState::RUNNING) {
+        g_next_active_ap_rtt_probe_at_ms = millis() + ACTIVE_AP_RTT_REFRESH_MS;
+    }
     if (state == LinkState::REQUEST_CODE) {
         g_bind_accepted = false;
     }
@@ -1613,37 +1648,23 @@ ConfirmBindResult perform_confirm_bind() {
 
 void log_active_access_point(const char *source) {
     if (g_active_ap.rtt_ms == access_point::RTT_UNKNOWN) {
-        Serial.printf("[NET][AP] %s -> %s (%s) %s:%u rtt=n/a\n",
+        Serial.printf("[NET][AP] %s -> id=%s %s:%u rtt=n/a\n",
                       source,
                       g_active_ap.id,
-                      g_active_ap.display_name,
                       g_active_ap.host,
                       static_cast<unsigned int>(g_active_ap.port));
         return;
     }
-    Serial.printf("[NET][AP] %s -> %s (%s) %s:%u rtt=%ums\n",
+    Serial.printf("[NET][AP] %s -> id=%s %s:%u rtt=%ums\n",
                   source,
                   g_active_ap.id,
-                  g_active_ap.display_name,
                   g_active_ap.host,
                   static_cast<unsigned int>(g_active_ap.port),
                   static_cast<unsigned int>(g_active_ap.rtt_ms));
 }
 
-// 发现失败时退回上次可用入口，再退回编译内置入口，保证链路不会因为
-// HTTP 接口暂时不可达而彻底断掉。
-void fall_back_to_known_access_point() {
-    if (access_point::load_cached(g_active_ap)) {
-        log_active_access_point("cached");
-    } else {
-        access_point::fallback_endpoint(g_active_ap);
-        log_active_access_point("builtin");
-    }
-    g_ap_selected_this_boot = true;
-}
-
-// 本次开机已经选过入口就直接复用，跳过发现与 ICMP 探测：
-// WiFi 接入位置在运行期间不会变，重测只会带来无谓的链路抖动。
+// 本次开机已经选过入口就直接复用，跳过重新发现与节点择优；
+// 运行态只刷新当前节点 RTT，不切换入口。
 LinkState state_after_credentials_ready() {
     if (g_ap_selected_this_boot && access_point::is_usable(g_active_ap)) {
         log_active_access_point("pinned");
@@ -1708,16 +1729,63 @@ bool step_access_point_probe() {
     return false;
 }
 
-void finish_access_point_discovery() {
+bool finish_access_point_discovery() {
     access_point::Endpoint selected = {};
     if (access_point::select_best(g_ap_candidates, g_ap_candidate_count, selected)) {
         g_active_ap = selected;
         g_ap_selected_this_boot = true;
-        access_point::save_cached(g_active_ap);
         log_active_access_point("selected");
+        refresh_server_status_widgets();
+        return true;
+    }
+    access_point::reset(g_active_ap);
+    g_ap_selected_this_boot = false;
+    refresh_server_status_widgets();
+    return false;
+}
+
+void update_active_access_point_rtt(uint32_t now_ms) {
+    if (g_state != LinkState::RUNNING || !access_point::is_usable(g_active_ap)) {
+        stop_active_ap_rtt_probe();
         return;
     }
-    fall_back_to_known_access_point();
+
+    if (g_active_ap_rtt_probe_running) {
+        uint16_t rtt_ms = access_point::RTT_UNKNOWN;
+        if (!access_point::probe_poll(rtt_ms)) {
+            return;
+        }
+
+        g_active_ap_rtt_probe_running = false;
+        const uint16_t previous_rtt_ms = g_active_ap.rtt_ms;
+        g_active_ap.rtt_ms = rtt_ms;
+        g_next_active_ap_rtt_probe_at_ms = now_ms + ACTIVE_AP_RTT_REFRESH_MS;
+        if (rtt_ms == access_point::RTT_UNKNOWN) {
+            Serial.printf("[NET][AP] runtime probe %s unreachable\n", g_active_ap.host);
+        } else {
+            Serial.printf("[NET][AP] runtime probe %s rtt=%ums\n",
+                          g_active_ap.host,
+                          static_cast<unsigned int>(rtt_ms));
+        }
+        if (previous_rtt_ms != rtt_ms) {
+            refresh_server_status_widgets();
+        }
+        return;
+    }
+
+    if (static_cast<int32_t>(now_ms - g_next_active_ap_rtt_probe_at_ms) < 0) {
+        return;
+    }
+
+    if (!access_point::probe_start(g_server_ip)) {
+        if (g_active_ap.rtt_ms != access_point::RTT_UNKNOWN) {
+            g_active_ap.rtt_ms = access_point::RTT_UNKNOWN;
+            refresh_server_status_widgets();
+        }
+        g_next_active_ap_rtt_probe_at_ms = now_ms + ACTIVE_AP_RTT_REFRESH_MS;
+        return;
+    }
+    g_active_ap_rtt_probe_running = true;
 }
 
 bool resolve_and_open_udp() {
@@ -2748,6 +2816,7 @@ void update_state_machine() {
     }
 
     if (g_state == LinkState::RUNNING) {
+        update_active_access_point_rtt(now);
         maybe_send_pending_radio_config();
     }
 
@@ -2829,15 +2898,17 @@ void update_state_machine() {
             if (begin_access_point_discovery()) {
                 enter_state(LinkState::DISCOVER_PROBE, 0);
             } else {
-                fall_back_to_known_access_point();
-                enter_state(LinkState::RESOLVE_SERVER, 0);
+                enter_state(LinkState::DISCOVER_FETCH, HTTP_RETRY_MS);
             }
             break;
 
         case LinkState::DISCOVER_PROBE:
             if (step_access_point_probe()) {
-                finish_access_point_discovery();
-                enter_state(LinkState::RESOLVE_SERVER, 0);
+                if (finish_access_point_discovery()) {
+                    enter_state(LinkState::RESOLVE_SERVER, 0);
+                } else {
+                    enter_state(LinkState::DISCOVER_FETCH, HTTP_RETRY_MS);
+                }
             } else {
                 enter_state(LinkState::DISCOVER_PROBE, DISCOVER_POLL_MS);
             }
@@ -2974,9 +3045,8 @@ bool net_audio_link_init() {
     device_config::set_defaults(g_config);
     device_config::load(g_config);
     access_point::reset(g_active_ap);
-    if (!access_point::load_cached(g_active_ap)) {
-        access_point::fallback_endpoint(g_active_ap);
-    }
+    g_active_ap_rtt_probe_running = false;
+    g_next_active_ap_rtt_probe_at_ms = 0;
     g_rf_guard_cfg = read_rf_guard_config_from_runtime();
     g_rf_guard_budget_ms = rf_guard_budget_capacity_ms(g_rf_guard_cfg);
     g_rf_guard_last_refill_at_ms = millis();

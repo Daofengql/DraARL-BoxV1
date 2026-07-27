@@ -2,7 +2,6 @@
 
 #include <ArduinoJson.h>
 #include <HTTPClient.h>
-#include <Preferences.h>
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
 
@@ -15,10 +14,6 @@
 
 namespace access_point {
 namespace {
-
-constexpr char CACHE_NS[] = "ap_cache";
-constexpr char FALLBACK_UDP_HOST[] = "ptt.4l2.cn";
-constexpr uint16_t FALLBACK_UDP_PORT = 60050;
 
 constexpr uint32_t HTTP_GATE_WAIT_MS = 1500;
 constexpr uint32_t HTTP_CONNECT_TIMEOUT_MS = 3000;
@@ -203,22 +198,6 @@ bool is_usable(const Endpoint &endpoint) {
     return endpoint.host[0] != '\0' && endpoint.port != 0;
 }
 
-const char *fallback_host() {
-    return FALLBACK_UDP_HOST;
-}
-
-uint16_t fallback_port() {
-    return FALLBACK_UDP_PORT;
-}
-
-void fallback_endpoint(Endpoint &endpoint) {
-    reset(endpoint);
-    copy_cstr(endpoint.id, "builtin");
-    copy_cstr(endpoint.display_name, "Built-in");
-    copy_cstr(endpoint.host, FALLBACK_UDP_HOST);
-    endpoint.port = FALLBACK_UDP_PORT;
-}
-
 bool fetch_candidates(const char *api_base_url,
                       const char *username,
                       const char *device_password,
@@ -274,10 +253,21 @@ bool fetch_candidates(const char *api_base_url,
 
         Endpoint &endpoint = out[out_count];
         reset(endpoint);
-        copy_cstr(endpoint.id, item["id"] | "");
-        copy_cstr(endpoint.display_name, item["display_name"] | "");
+        const JsonVariantConst id = item["id"];
+        if (id.is<const char *>()) {
+            copy_cstr(endpoint.id, id.as<const char *>());
+        } else if (id.is<uint64_t>()) {
+            snprintf(endpoint.id,
+                     sizeof(endpoint.id),
+                     "%llu",
+                     static_cast<unsigned long long>(id.as<uint64_t>()));
+        } else if (id.is<int64_t>()) {
+            snprintf(endpoint.id,
+                     sizeof(endpoint.id),
+                     "%lld",
+                     static_cast<long long>(id.as<int64_t>()));
+        }
         copy_cstr(endpoint.host, host);
-        copy_cstr(endpoint.region, item["region"] | "");
         endpoint.port = static_cast<uint16_t>(port);
         endpoint.priority = item["priority"] | 0;
         ++out_count;
@@ -410,60 +400,6 @@ bool select_best(const Endpoint *candidates, size_t count, Endpoint &out) {
     }
     out = *best;
     return true;
-}
-
-bool load_cached(Endpoint &out) {
-    reset(out);
-
-    Preferences prefs;
-    if (!prefs.begin(CACHE_NS, true)) {
-        return false;
-    }
-
-    prefs.getString("host", out.host, sizeof(out.host));
-    out.port = prefs.getUShort("port", 0);
-    prefs.getString("id", out.id, sizeof(out.id));
-    prefs.getString("name", out.display_name, sizeof(out.display_name));
-    prefs.getString("region", out.region, sizeof(out.region));
-    out.priority = static_cast<int32_t>(prefs.getLong("prio", 0));
-    out.rtt_ms = prefs.getUShort("rtt", RTT_UNKNOWN);
-    prefs.end();
-
-    if (!is_usable(out)) {
-        reset(out);
-        return false;
-    }
-    return true;
-}
-
-bool save_cached(const Endpoint &endpoint) {
-    if (!is_usable(endpoint)) {
-        return false;
-    }
-
-    Preferences prefs;
-    if (!prefs.begin(CACHE_NS, false)) {
-        return false;
-    }
-
-    prefs.putString("host", endpoint.host);
-    prefs.putUShort("port", endpoint.port);
-    prefs.putString("id", endpoint.id);
-    prefs.putString("name", endpoint.display_name);
-    prefs.putString("region", endpoint.region);
-    prefs.putLong("prio", endpoint.priority);
-    prefs.putUShort("rtt", endpoint.rtt_ms);
-    prefs.end();
-    return true;
-}
-
-void clear_cached() {
-    Preferences prefs;
-    if (!prefs.begin(CACHE_NS, false)) {
-        return;
-    }
-    prefs.clear();
-    prefs.end();
 }
 
 } // namespace access_point

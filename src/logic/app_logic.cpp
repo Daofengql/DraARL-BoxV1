@@ -36,6 +36,7 @@ constexpr uint32_t STARTUP_STEP_INTERVAL_MS = 350;
 constexpr uint32_t CLOCK_REFRESH_INTERVAL_MS = 1000;
 constexpr uint32_t INPUT_RESUME_AFTER_PTT_MS = 500;
 constexpr uint32_t OTA_CHECK_INTERVAL_MS = 3600000;  // 1小时检查一次
+constexpr uint32_t STANDBY_TIMEOUT_MS = 60000;
 constexpr size_t STARTUP_STEP_COUNT = 6;
 
 enum class AppState {
@@ -80,6 +81,88 @@ bool ota_waiting_for_wifi_logged = false;
 bool ota_waiting_for_initial_delay_logged = false;
 bool ota_auto_check_disabled_logged = false;
 bool ota_check_in_progress_logged = false;
+bool standby_active = false;
+bool discard_standby_wake_button_gesture = false;
+uint32_t last_standby_activity_at_ms = 0;
+lv_obj_t *standby_previous_screen = nullptr;
+
+float get_saved_backlight_level() {
+    return static_cast<float>(device_config::load_backlight_pwm()) / 255.0f;
+}
+
+bool standby_is_blocked_by_ui() {
+    return edit_controller_is_screen_locked() ||
+           edit_controller_is_power_popup_visible() ||
+           connectivity_manager_is_ble_popup_visible() ||
+           net_audio_link_is_bind_popup_visible();
+}
+
+void enter_standby(uint32_t now_ms) {
+    if (standby_active || !ui_Standby) {
+        return;
+    }
+
+    standby_previous_screen = lv_scr_act();
+    standby_active = true;
+
+    updateBacklight(get_saved_backlight_level() * 0.5f);
+    lv_disp_load_scr(ui_Standby);
+    lv_refr_now(lv_disp_get_default());
+
+    Serial.printf("[UI] Standby entered after %lu ms idle.\n",
+                  static_cast<unsigned long>(now_ms - last_standby_activity_at_ms));
+}
+
+void leave_standby(uint32_t now_ms) {
+    if (!standby_active) {
+        last_standby_activity_at_ms = now_ms;
+        return;
+    }
+
+    lv_obj_t *restore_screen = standby_previous_screen;
+    if (!restore_screen || !lv_obj_is_valid(restore_screen) || restore_screen == ui_Standby) {
+        restore_screen = ui_main;
+    }
+
+    standby_active = false;
+    standby_previous_screen = nullptr;
+    last_standby_activity_at_ms = now_ms;
+
+    if (restore_screen) {
+        lv_disp_load_scr(restore_screen);
+        lv_refr_now(lv_disp_get_default());
+    }
+    updateBacklight(get_saved_backlight_level());
+    Serial.println("[UI] Standby exited.");
+}
+
+void record_standby_activity(uint32_t now_ms) {
+    if (standby_active) {
+        leave_standby(now_ms);
+    } else {
+        last_standby_activity_at_ms = now_ms;
+    }
+}
+
+void update_standby(uint32_t now_ms) {
+    if (app_state != AppState::MAIN_READY) {
+        last_standby_activity_at_ms = now_ms;
+        return;
+    }
+
+    const bool radio_active = sa818_is_tx() || sa818_is_rx();
+    const bool ui_blocked = standby_is_blocked_by_ui();
+
+    if (radio_active || ui_blocked) {
+        record_standby_activity(now_ms);
+        return;
+    }
+
+    if (!standby_active &&
+        (now_ms - last_standby_activity_at_ms) >= STANDBY_TIMEOUT_MS) {
+        enter_standby(now_ms);
+    }
+}
 
 void reconcile_pending_ota_state_on_boot(device_config::OTAConfig &config) {
     if (!config.has_pending_update || config.available_version[0] == '\0') {
@@ -442,6 +525,7 @@ void check_ota_update_if_needed(uint32_t now_ms) {
 
 void enter_main_screen() {
     app_state = AppState::MAIN_READY;
+    last_standby_activity_at_ms = millis();
 
     lv_disp_load_scr(ui_main);
     edit_controller_on_enter_main_screen();
@@ -489,6 +573,26 @@ void start_boot_sequence(uint32_t now_ms) {
 }
 
 void on_encoder_event(EC11Event event, int32_t value) {
+    if (event == EC11Event::NONE) {
+        return;
+    }
+
+    if (standby_active) {
+        discard_standby_wake_button_gesture =
+            event == EC11Event::BUTTON_PRESS || event == EC11Event::BUTTON_RELEASE;
+        leave_standby(millis());
+        return;
+    }
+
+    if (discard_standby_wake_button_gesture) {
+        if (event == EC11Event::BUTTON_CLICK || event == EC11Event::BUTTON_LONG_PRESS) {
+            discard_standby_wake_button_gesture = false;
+        }
+        return;
+    }
+
+    last_standby_activity_at_ms = millis();
+
     if (connectivity_manager_handle_encoder_event(event, value)) {
         return;
     }
@@ -652,6 +756,10 @@ void app_logic_init() {
     ota_waiting_for_initial_delay_logged = false;
     ota_auto_check_disabled_logged = false;
     ota_check_in_progress_logged = false;
+    standby_active = false;
+    discard_standby_wake_button_gesture = false;
+    standby_previous_screen = nullptr;
+    last_standby_activity_at_ms = millis();
     refresh_time_widgets(true);
     if (auto_start_enabled) {
         Serial.println("Auto-start is enabled. Starting boot sequence.");
@@ -673,8 +781,16 @@ void app_logic_update() {
     if (should_poll_local_inputs(now_ms)) {
         ec11_update();
         update_power_key(now_ms);
-        edit_controller_update();
+        if (!standby_active) {
+            edit_controller_update();
+        }
     }
+
+    update_standby(now_ms);
+}
+
+bool app_logic_should_refresh_display() {
+    return !standby_active;
 }
 
 void app_logic_set_time_from_server_ms(int64_t unix_ms) {
@@ -707,18 +823,21 @@ void app_logic_set_time_from_server_ms(int64_t unix_ms) {
 }
 
 void app_logic_on_ptt_prepare() {
+    record_standby_activity(millis());
     local_input_gate_state = LocalInputGateState::TX_PREPARE;
     local_input_resume_at_ms = 0;
     reset_local_input_state();
 }
 
 void app_logic_on_ptt_started() {
+    record_standby_activity(millis());
     local_input_gate_state = LocalInputGateState::TX_ACTIVE;
     local_input_resume_at_ms = 0;
     reset_local_input_state();
 }
 
 void app_logic_on_ptt_released() {
+    record_standby_activity(millis());
     local_input_gate_state = LocalInputGateState::TX_RELEASE_GUARD;
     local_input_resume_at_ms = millis() + INPUT_RESUME_AFTER_PTT_MS;
     reset_local_input_state();

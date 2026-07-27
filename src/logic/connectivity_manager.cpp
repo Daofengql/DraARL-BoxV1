@@ -594,8 +594,6 @@ void add_config_to_response(JsonObject root) {
     JsonObject active = server["access_point"].to<JsonObject>();
     if (net_audio_link_get_access_point(endpoint)) {
         active["id"] = endpoint.id;
-        active["display_name"] = endpoint.display_name;
-        active["region"] = endpoint.region;
         active["udp_host"] = endpoint.host;
         active["udp_port"] = endpoint.port;
         if (endpoint.rtt_ms != access_point::RTT_UNKNOWN) {

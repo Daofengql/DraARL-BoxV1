@@ -23,6 +23,7 @@ lv_obj_t * ui_wifistat = NULL;
 lv_obj_t * ui_bluestat = NULL;
 lv_obj_t * ui_hasNewUpdate = NULL;
 lv_obj_t * ui_toSetting = NULL;
+lv_obj_t * ui_nodeLatency = NULL;
 lv_obj_t * ui_server = NULL;
 lv_obj_t * ui_configsync = NULL;
 lv_obj_t * ui_serverstat = NULL;
@@ -156,7 +157,7 @@ void ui_main_screen_init(void)
     lv_obj_set_x(ui_logo, -110);
     lv_obj_set_y(ui_logo, 0);
     lv_obj_set_align(ui_logo, LV_ALIGN_CENTER);
-    lv_label_set_text(ui_logo, "DraARL-PTT");
+    lv_label_set_text(ui_logo, "DraARL");
     lv_obj_set_style_text_color(ui_logo, lv_color_hex(0x00DDFF), LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_text_opa(ui_logo, 255, LV_PART_MAIN | LV_STATE_DEFAULT);
     lv_obj_set_style_text_font(ui_logo, &lv_font_montserrat_14, LV_PART_MAIN | LV_STATE_DEFAULT);
@@ -217,6 +218,21 @@ void ui_main_screen_init(void)
     lv_obj_set_y(ui_toSetting, 100);
     lv_obj_set_align(ui_toSetting, LV_ALIGN_CENTER);
 
+    ui_nodeLatency = lv_label_create(ui_main);
+    lv_obj_set_width(ui_nodeLatency, 220);
+    lv_obj_set_height(ui_nodeLatency, 20);
+    lv_obj_set_x(ui_nodeLatency, 0);
+    lv_obj_set_y(ui_nodeLatency, 100);
+    lv_obj_set_align(ui_nodeLatency, LV_ALIGN_CENTER);
+    lv_label_set_long_mode(ui_nodeLatency, LV_LABEL_LONG_CLIP);
+    lv_label_set_recolor(ui_nodeLatency, true);
+    lv_label_set_text(ui_nodeLatency, "AP -- : #8B98A5 --ms#");
+    lv_obj_set_style_text_align(ui_nodeLatency, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_text_color(ui_nodeLatency, lv_color_hex(0xE3E3E3), LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_text_opa(ui_nodeLatency, 255, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_text_font(ui_nodeLatency, &lv_font_montserrat_14, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_clear_flag(ui_nodeLatency, LV_OBJ_FLAG_SCROLLABLE);
+
     ui_server = lv_obj_create(ui_main);
     lv_obj_remove_style_all(ui_server);
     lv_obj_set_width(ui_server, 30);
@@ -271,6 +287,7 @@ void ui_main_screen_destroy(void)
     ui_bluestat = NULL;
     ui_hasNewUpdate = NULL;
     ui_toSetting = NULL;
+    ui_nodeLatency = NULL;
     ui_server = NULL;
     ui_configsync = NULL;
     ui_serverstat = NULL;

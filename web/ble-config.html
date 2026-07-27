@@ -854,9 +854,9 @@
         return;
       }
 
-      const parts = [`${accessPoint.udp_host}:${accessPoint.udp_port}`];
-      if (accessPoint.display_name) parts.push(accessPoint.display_name);
-      if (accessPoint.region) parts.push(accessPoint.region);
+      const parts = [];
+      if (accessPoint.id) parts.push(`AP ${accessPoint.id}`);
+      parts.push(`${accessPoint.udp_host}:${accessPoint.udp_port}`);
       if (accessPoint.rtt_ms !== undefined) parts.push(`${accessPoint.rtt_ms} ms`);
       target.textContent = parts.join(" · ");
     }

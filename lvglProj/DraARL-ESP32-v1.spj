@@ -313,7 +313,7 @@
                   {
                     "nid": 1030,
                     "strtype": "LABEL/Text",
-                    "strval": "DraARL-PTT",
+                    "strval": "DraARL",
                     "InheritedType": 10
                   },
                   {
@@ -2693,7 +2693,7 @@
                   {
                     "nid": 1030,
                     "strtype": "LABEL/Text",
-                    "strval": "DraARL-PTT",
+                    "strval": "DraARL",
                     "InheritedType": 10
                   },
                   {
@@ -7288,7 +7288,7 @@
                   {
                     "nid": 1030,
                     "strtype": "LABEL/Text",
-                    "strval": "DraARL-PTT",
+                    "strval": "DraARL",
                     "InheritedType": 10
                   },
                   {
@@ -9517,7 +9517,7 @@
                   {
                     "nid": 1030,
                     "strtype": "LABEL/Text",
-                    "strval": "DraARL-PTT",
+                    "strval": "DraARL",
                     "InheritedType": 10
                   },
                   {
@@ -12042,7 +12042,7 @@
                   {
                     "nid": 1030,
                     "strtype": "LABEL/Text",
-                    "strval": "DraARL-PTT",
+                    "strval": "DraARL",
                     "InheritedType": 10
                   },
                   {

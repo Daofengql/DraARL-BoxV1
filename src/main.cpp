@@ -170,6 +170,8 @@ void setup() {
 void loop() {
     app_logic_update();
 
-    lv_timer_handler();
+    if (app_logic_should_refresh_display()) {
+        lv_timer_handler();
+    }
     delay(5);
 }

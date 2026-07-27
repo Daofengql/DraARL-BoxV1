@@ -4,7 +4,7 @@
 // ===================================================================
 //                       固件版本
 // ===================================================================
-#define FIRMWARE_VERSION "0.0.11"
+#define FIRMWARE_VERSION "0.0.12"
 #define DEVICE_MODEL_RF 1
 #define DEVICE_MODEL_NO_RF 2
 #define DEVICE_MODEL DEVICE_MODEL_RF

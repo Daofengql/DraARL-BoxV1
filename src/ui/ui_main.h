@@ -31,6 +31,7 @@ extern lv_obj_t * ui_wifistat;
 extern lv_obj_t * ui_bluestat;
 extern lv_obj_t * ui_hasNewUpdate;
 extern lv_obj_t * ui_toSetting;
+extern lv_obj_t * ui_nodeLatency;
 extern lv_obj_t * ui_server;
 extern lv_obj_t * ui_configsync;
 extern lv_obj_t * ui_serverstat;
@@ -41,4 +42,3 @@ extern lv_obj_t * ui_serverstat;
 #endif
 
 #endif
-

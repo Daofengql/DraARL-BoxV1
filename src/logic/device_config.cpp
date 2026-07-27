@@ -9,11 +9,6 @@ namespace {
 constexpr char CONFIG_NS[] = "device_cfg";
 constexpr char LEGACY_SERVER_HTTP_API_BASE_URL[] = "https://ptt.4l2.cn";
 constexpr char DEFAULT_SERVER_HTTP_API_BASE_URL[] = "https://ptt.4l2.cn";
-// UDP 入口不再由用户配置，改由 access_point_discovery 通过 HTTP 接口发现。
-constexpr char LEGACY_UDP_HOST_KEY[] = "svr_udp_h";
-constexpr char LEGACY_UDP_PORT_KEY[] = "svr_udp_p";
-constexpr uint16_t SERVER_DEFAULT_REVISION = 2;
-constexpr char SERVER_DEFAULT_REVISION_KEY[] = "svr_def_rev";
 constexpr char BACKLIGHT_KEY[] = "ui_bl";
 constexpr char AUTO_START_KEY[] = "ui_ast";
 
@@ -194,51 +189,6 @@ bool server_defaults_changed() {
     return strcmp(DEFAULT_SERVER_HTTP_API_BASE_URL, LEGACY_SERVER_HTTP_API_BASE_URL) != 0;
 }
 
-bool persist_server_config(Preferences &prefs, const ServerConfig &config) {
-    prefs.putString("svr_call", config.callsign);
-    prefs.putUChar("svr_ssid", config.node_ssid);
-    prefs.putULong("svr_dmr", config.dmr_id);
-    prefs.putString("svr_http", config.http_api_base_url);
-    prefs.putString("svr_acc", config.account);
-    prefs.putString("svr_pwd", config.device_auth_password);
-    prefs.putUShort(SERVER_DEFAULT_REVISION_KEY, SERVER_DEFAULT_REVISION);
-    return true;
-}
-
-bool migrate_legacy_server_defaults(ServerConfig &config) {
-    Preferences prefs;
-    if (!prefs.begin(CONFIG_NS, false)) {
-        return false;
-    }
-
-    const uint16_t stored_revision = prefs.getUShort(SERVER_DEFAULT_REVISION_KEY, 0);
-    if (stored_revision >= SERVER_DEFAULT_REVISION) {
-        prefs.end();
-        return false;
-    }
-
-    // 修订 2：UDP 入口改为服务端发现，清掉旧的手工配置键。
-    prefs.remove(LEGACY_UDP_HOST_KEY);
-    prefs.remove(LEGACY_UDP_PORT_KEY);
-
-    bool changed = false;
-    if (server_defaults_changed() &&
-        strcmp(config.http_api_base_url, LEGACY_SERVER_HTTP_API_BASE_URL) == 0) {
-        copy_cstr(config.http_api_base_url, DEFAULT_SERVER_HTTP_API_BASE_URL);
-        changed = true;
-    }
-
-    if (!changed) {
-        prefs.putUShort(SERVER_DEFAULT_REVISION_KEY, SERVER_DEFAULT_REVISION);
-        prefs.end();
-        return false;
-    }
-
-    sanitize_server_config(config);
-    const bool ok = persist_server_config(prefs, config);
-    prefs.end();
-    return ok;
-}
 } // namespace
 
 void set_defaults(DeviceConfig &config) {
@@ -304,7 +254,6 @@ bool load(DeviceConfig &config) {
     load_server_config(prefs, config.server);
     load_ota_config(prefs, config.ota);
     prefs.end();
-    migrate_legacy_server_defaults(config.server);
     return true;
 }
 

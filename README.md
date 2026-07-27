@@ -2,6 +2,8 @@
 
 **DraARL-RFBox-1** 是 DraARL 系列第一代 RFBox 终端固件。当前代码面向带 RF 的手持/台式实验硬件：ESP32-S3 N16R8 主控、ST7789 屏幕、EC11 旋钮、SA818 UHF 射频模块、ES8388 音频编解码器，并通过 Wi-Fi 接入 DraARL 服务端。
 
+设备界面品牌正式使用 **DraARL**，项目归属 **DraARL 项目组**。
+
 固件重点覆盖四件事：
 
 1. 本地射频终端控制：频率、亚音、静噪、带宽、功率、RF Guard。
@@ -9,7 +11,7 @@
 3. 网络语音链路：DraARL UDP 鉴权、心跳、Opus 16 kHz 语音收发、网络到 RF 桥接。
 4. 设备运维：NVS 参数持久化、服务器配置同步、时间同步、OTA 检查与升级。
 
-当前固件版本定义在 [`src/config.h`](src/config.h)：`FIRMWARE_VERSION = 0.0.5`，`DEVICE_MODEL = 1`。
+当前固件版本定义在 [`src/config.h`](src/config.h)：`FIRMWARE_VERSION = 0.0.12`，`DEVICE_MODEL = 1`。
 
 ## 授权协议
 
@@ -25,6 +27,7 @@
 - 320x240 LVGL 图形界面，包含启动页、主页面、设置页、RF 高级页和信息页。
 - KEY0 长按开机，支持设置页开启自启动。
 - EC11 旋钮负责页面导航、数值调整、确认和编辑状态切换。
+- 无收发和 EC11 操作 60 秒后进入待机：背光降至设置亮度的一半，显示屏保并暂停屏幕刷新；收发或 EC11 操作会立即唤醒。
 - SA818 UHF 模块初始化与运行时参数下发。
 - 支持 TX/RX 频率、TX/RX 亚音、静噪、宽/窄带、功率高低切换。
 - 支持 RF Guard：单次发射时长限制、滑动窗口占空保护和网络语音过载保护。
@@ -125,7 +128,7 @@
 | [`src/logic/edit_controller.cpp`](src/logic/edit_controller.cpp) | 主界面/设置页/RF 页/信息页交互，射频参数编辑和持久化 |
 | [`src/logic/connectivity_manager.cpp`](src/logic/connectivity_manager.cpp) | Wi-Fi 状态机、BLE GATT、动态码认证、BLE RPC 配置 |
 | [`src/logic/net_audio_link.cpp`](src/logic/net_audio_link.cpp) | DraARL HTTP/UDP 状态机、绑定、鉴权、心跳、配置同步、语音桥接、RF Guard |
-| [`src/logic/access_point_discovery.cpp`](src/logic/access_point_discovery.cpp) | 入口发现：拉取服务端 UDP 接入点列表、ICMP 测速择优、结果缓存 |
+| [`src/logic/access_point_discovery.cpp`](src/logic/access_point_discovery.cpp) | 入口发现：拉取服务端 UDP 接入点列表并通过 ICMP 测速择优 |
 | [`src/logic/device_config.cpp`](src/logic/device_config.cpp) | Wi-Fi、Radio、Server、OTA、本地 UI 配置的默认值、校验和 NVS 读写 |
 | [`src/logic/ota_update.cpp`](src/logic/ota_update.cpp) | 固件版本检查、下载、哈希校验、写入 OTA 分区 |
 | [`src/drivers/sa818_driver.cpp`](src/drivers/sa818_driver.cpp) | SA818 AT 指令封装、频率/亚音/静噪/带宽/功率/PTT 控制 |
@@ -224,13 +227,12 @@ RF 功率通过 `SA818_PW` 控制：
 | UI | `ui_ast` | 自启动开关 |
 
 UDP 接入点不再是配置项，由 [`src/logic/access_point_discovery.cpp`](src/logic/access_point_discovery.cpp)
-在开机时向服务端发现，选中结果缓存在独立命名空间 `ap_cache`（`host` / `port` / `id` /
-`name` / `region` / `prio` / `rtt`），仅作为发现失败时的兜底，不接受用户写入。
+在开机时向服务端发现，不接受用户写入。发现失败时设备会定时重新请求，不读取旧 NVS
+缓存，也不回退到固件内置 UDP 入口。
 
 默认服务器参数：
 
 - HTTP API Base URL：`https://ptt.4l2.cn`
-- 内置兜底 UDP 入口：`ptt.4l2.cn:60050`
 
 背光亮度保存为 PWM 值，范围 `20` 到 `255`。
 
@@ -243,6 +245,8 @@ WAIT_WIFI -> PRECHECK -> REQUEST_CODE / CONFIRM_BIND -> DISCOVER_FETCH -> DISCOV
 ```
 
 链路能力：
+
+- 主界面底部显示当前节点 ID 和 RTT；延迟每 5 秒异步刷新，并按延迟区间变色。
 
 - 若本地没有账号或设备准入密码，会请求动态绑定码并在屏幕上显示。
 - 通过 HTTP 接口完成预检查、请求绑定码、确认绑定。
@@ -401,7 +405,7 @@ pio device monitor -b 115200
 ### 打包固件
 
 ```bash
-python tools/package_firmware.py --env esp32s3-n16r8 --version 0.0.5
+python tools/package_firmware.py --env esp32s3-n16r8 --version 0.0.12
 ```
 
 打包脚本会收集 bootloader、分区表、固件和可用的 `boot_app0.bin`，生成 `flash_manifest.json`、`flash_args.txt`、`SHA256SUMS.txt` 和 zip 包。

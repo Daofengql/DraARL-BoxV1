@@ -16,7 +16,6 @@ constexpr size_t ACCOUNT_MAX_LEN = 31;
 constexpr size_t PASSWORD_MAX_LEN = 63;
 constexpr size_t CALLSIGN_MAX_LEN = 15;
 constexpr size_t OTA_VERSION_MAX_LEN = 31;
-constexpr size_t OTA_DOWNLOAD_URL_MAX_LEN = 255;
 constexpr size_t OTA_HASH_MAX_LEN = 64;
 constexpr size_t OTA_HASH_ALGO_MAX_LEN = 15;
 constexpr uint8_t BACKLIGHT_PWM_MIN = 20;
@@ -95,7 +94,6 @@ struct OTAConfig {
     uint32_t last_check_time;
     char available_version[OTA_VERSION_MAX_LEN + 1];
     bool has_pending_update;
-    char download_url[OTA_DOWNLOAD_URL_MAX_LEN + 1];
     char file_hash[OTA_HASH_MAX_LEN + 1];
     char file_hash_algorithm[OTA_HASH_ALGO_MAX_LEN + 1];
     uint32_t file_size;

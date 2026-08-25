@@ -219,8 +219,20 @@ bool parse_firmware_response(const char *json_str, size_t json_len, FirmwareInfo
     }
 
     if (data["download_url"].is<const char*>()) {
-        strncpy(info.download_url, data["download_url"], sizeof(info.download_url) - 1);
-        info.download_url[sizeof(info.download_url) - 1] = '\0';
+        const char *download_url = data["download_url"];
+        const size_t download_url_len = download_url ? strlen(download_url) : 0;
+        if (!download_url || download_url_len == 0) {
+            set_error("No download URL");
+            return false;
+        }
+        if (download_url_len >= sizeof(info.download_url)) {
+            Serial.printf("[OTA] Download URL too long (%u > %u).\n",
+                          static_cast<unsigned int>(download_url_len),
+                          static_cast<unsigned int>(sizeof(info.download_url) - 1));
+            set_error("Download URL too long");
+            return false;
+        }
+        strcpy(info.download_url, download_url);
     } else {
         set_error("No download URL");
         return false;
@@ -243,11 +255,11 @@ bool parse_firmware_response(const char *json_str, size_t json_len, FirmwareInfo
 
     info.file_size = data["file_size"] | 0;
 
-    Serial.printf("[OTA] Parsed update: version=%s size=%lu hash_algo=%s url=%s\n",
+    Serial.printf("[OTA] Parsed update: version=%s size=%lu hash_algo=%s url_len=%u\n",
                   info.version,
                   static_cast<unsigned long>(info.file_size),
                   info.file_hash_algorithm[0] != '\0' ? info.file_hash_algorithm : "<none>",
-                  info.download_url[0] != '\0' ? info.download_url : "<empty>");
+                  static_cast<unsigned int>(strlen(info.download_url)));
 
     return true;
 }

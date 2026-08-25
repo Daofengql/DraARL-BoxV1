@@ -113,12 +113,10 @@ void sanitize_server_config(ServerConfig &config) {
 
 void sanitize_ota_config(OTAConfig &config) {
     config.available_version[OTA_VERSION_MAX_LEN] = '\0';
-    config.download_url[OTA_DOWNLOAD_URL_MAX_LEN] = '\0';
     config.file_hash[OTA_HASH_MAX_LEN] = '\0';
     config.file_hash_algorithm[OTA_HASH_ALGO_MAX_LEN] = '\0';
     if (!config.has_pending_update) {
         config.available_version[0] = '\0';
-        config.download_url[0] = '\0';
         config.file_hash[0] = '\0';
         config.file_hash_algorithm[0] = '\0';
         config.file_size = 0;
@@ -131,7 +129,6 @@ void load_ota_config(Preferences &prefs, OTAConfig &config) {
     config.last_check_time = prefs.getULong("ota_last", 0);
     load_optional_string(prefs, "ota_ver", config.available_version, sizeof(config.available_version));
     config.has_pending_update = prefs.getBool("ota_pend", false);
-    load_optional_string(prefs, "ota_url", config.download_url, sizeof(config.download_url));
     load_optional_string(prefs, "ota_hash", config.file_hash, sizeof(config.file_hash));
     load_optional_string(prefs, "ota_alg", config.file_hash_algorithm, sizeof(config.file_hash_algorithm));
     config.file_size = prefs.getULong("ota_size", 0);
@@ -253,7 +250,17 @@ bool load(DeviceConfig &config) {
     load_radio_config(prefs, config.radio);
     load_server_config(prefs, config.server);
     load_ota_config(prefs, config.ota);
+    const bool legacy_ota_url_present = prefs.isKey("ota_url");
     prefs.end();
+
+    if (legacy_ota_url_present) {
+        Preferences cleanup_prefs;
+        if (cleanup_prefs.begin(CONFIG_NS, false)) {
+            cleanup_prefs.remove("ota_url");
+            cleanup_prefs.end();
+        }
+    }
+
     return true;
 }
 
@@ -294,6 +301,9 @@ bool save(const DeviceConfig &config) {
         return false;
     }
 
+    // Remove the legacy cached pre-signed URL. It is expired state, not config.
+    prefs.remove("ota_url");
+
     prefs.putString("wifi_ssid", config.wifi.ssid);
     prefs.putString("wifi_pwd", config.wifi.password);
     prefs.putBool("wifi_dhcp", config.wifi.dhcp);
@@ -333,7 +343,6 @@ bool save(const DeviceConfig &config) {
     prefs.putULong("ota_last", config.ota.last_check_time);
     prefs.putString("ota_ver", config.ota.available_version);
     prefs.putBool("ota_pend", config.ota.has_pending_update);
-    prefs.putString("ota_url", config.ota.download_url);
     prefs.putString("ota_hash", config.ota.file_hash);
     prefs.putString("ota_alg", config.ota.file_hash_algorithm);
     prefs.putULong("ota_size", config.ota.file_size);

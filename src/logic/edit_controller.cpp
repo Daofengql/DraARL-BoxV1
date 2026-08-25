@@ -2485,10 +2485,6 @@ bool edit_controller_is_editing() {
     return is_editing_session_active();
 }
 
-bool edit_controller_is_screen_locked() {
-    return screen_locked;
-}
-
 void edit_controller_on_update_button_click() {
     if (!update_available) {
         return;

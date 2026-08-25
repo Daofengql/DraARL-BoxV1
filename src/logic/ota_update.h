@@ -5,6 +5,10 @@
 
 namespace ota_update {
 
+// Runtime-only storage for the download URL. Pre-signed URLs are never
+// persisted because their signatures expire.
+constexpr size_t OTA_RUNTIME_DOWNLOAD_URL_MAX_LEN = 1023;
+
 enum class OTAState : uint8_t {
     IDLE = 0,
     CHECKING = 1,
@@ -17,7 +21,7 @@ enum class OTAState : uint8_t {
 struct FirmwareInfo {
     char version[32];
     char changelog[256];
-    char download_url[256];
+    char download_url[OTA_RUNTIME_DOWNLOAD_URL_MAX_LEN + 1];
     char file_hash[65];
     char file_hash_algorithm[16];
     uint32_t file_size;

@@ -11,7 +11,7 @@
 3. 网络语音链路：DraARL UDP 鉴权、心跳、Opus 16 kHz 语音收发、网络到 RF 桥接。
 4. 设备运维：NVS 参数持久化、服务器配置同步、时间同步、OTA 检查与升级。
 
-当前固件版本定义在 [`src/config.h`](src/config.h)：`FIRMWARE_VERSION = 0.0.12`，`DEVICE_MODEL = 1`。
+当前固件版本定义在 [`src/config.h`](src/config.h)：`FIRMWARE_VERSION = 0.0.13`，`DEVICE_MODEL = 1`。
 
 ## 授权协议
 
@@ -27,7 +27,6 @@
 - 320x240 LVGL 图形界面，包含启动页、主页面、设置页、RF 高级页和信息页。
 - KEY0 长按开机，支持设置页开启自启动。
 - EC11 旋钮负责页面导航、数值调整、确认和编辑状态切换。
-- 无收发和 EC11 操作 60 秒后进入待机：背光降至设置亮度的一半，显示屏保并暂停屏幕刷新；收发或 EC11 操作会立即唤醒。
 - SA818 UHF 模块初始化与运行时参数下发。
 - 支持 TX/RX 频率、TX/RX 亚音、静噪、宽/窄带、功率高低切换。
 - 支持 RF Guard：单次发射时长限制、滑动窗口占空保护和网络语音过载保护。
@@ -219,7 +218,6 @@ RF 功率通过 `SA818_PW` 控制：
 | OTA | `ota_last` | 上次检查时间 |
 | OTA | `ota_ver` | 待更新版本 |
 | OTA | `ota_pend` | 是否存在待更新 |
-| OTA | `ota_url` | 固件下载地址 |
 | OTA | `ota_hash` | 固件哈希 |
 | OTA | `ota_alg` | 哈希算法 |
 | OTA | `ota_size` | 固件大小 |
@@ -347,9 +345,9 @@ OTA 逻辑由 [`src/logic/ota_update.cpp`](src/logic/ota_update.cpp) 实现。
 
 - 主界面进入后，Wi-Fi 就绪时进行首次检查。
 - 后续按 1 小时间隔检查。
-- 服务端返回新版本后，将版本、下载地址、哈希、文件大小保存到 NVS。
+- 服务端返回新版本后，将版本、哈希和文件大小保存到 NVS；预签名下载地址仅在内存中使用，不持久化。
 - UI 显示更新提示，设置页更新按钮变为可用。
-- 点击更新按钮后下载固件，支持 MD5 或 SHA256 校验，通过后写入 OTA 分区并重启。
+- 点击更新按钮后会重新检查版本并获取新的下载地址，再下载固件；支持 MD5 或 SHA256 校验，通过后写入 OTA 分区并重启。
 - 重启后如果当前版本已经不低于待更新版本，会清理 pending 状态。
 
 ## 编译与烧录
@@ -405,7 +403,7 @@ pio device monitor -b 115200
 ### 打包固件
 
 ```bash
-python tools/package_firmware.py --env esp32s3-n16r8 --version 0.0.12
+python tools/package_firmware.py --env esp32s3-n16r8 --version 0.0.13
 ```
 
 打包脚本会收集 bootloader、分区表、固件和可用的 `boot_app0.bin`，生成 `flash_manifest.json`、`flash_args.txt`、`SHA256SUMS.txt` 和 zip 包。

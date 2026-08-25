@@ -1,8 +1,6 @@
 #include <Arduino.h>
 #include <lvgl.h>
 
-#include <cstring>
-
 #include "config.h"
 #include "drivers/display.h"
 #include "logic/app_logic.h"
@@ -45,29 +43,6 @@ void updateBacklight(float level) {
     ledcWrite(PWM_CHANNEL, duty_cycle);
 }
 
-static bool load_pending_update_info(ota_update::FirmwareInfo &info) {
-    device_config::DeviceConfig config = {};
-    device_config::set_defaults(config);
-    device_config::load(config);
-
-    if (!config.ota.has_pending_update || config.ota.download_url[0] == '\0') {
-        return false;
-    }
-
-    memset(&info, 0, sizeof(info));
-    info.has_update = true;
-    strncpy(info.version, config.ota.available_version, sizeof(info.version) - 1);
-    info.version[sizeof(info.version) - 1] = '\0';
-    strncpy(info.download_url, config.ota.download_url, sizeof(info.download_url) - 1);
-    info.download_url[sizeof(info.download_url) - 1] = '\0';
-    strncpy(info.file_hash, config.ota.file_hash, sizeof(info.file_hash) - 1);
-    info.file_hash[sizeof(info.file_hash) - 1] = '\0';
-    strncpy(info.file_hash_algorithm, config.ota.file_hash_algorithm, sizeof(info.file_hash_algorithm) - 1);
-    info.file_hash_algorithm[sizeof(info.file_hash_algorithm) - 1] = '\0';
-    info.file_size = config.ota.file_size;
-    return true;
-}
-
 static void clear_pending_update_state() {
     device_config::DeviceConfig config = {};
     device_config::set_defaults(config);
@@ -77,7 +52,6 @@ static void clear_pending_update_state() {
 
     config.ota.has_pending_update = false;
     config.ota.available_version[0] = '\0';
-    config.ota.download_url[0] = '\0';
     config.ota.file_hash[0] = '\0';
     config.ota.file_hash_algorithm[0] = '\0';
     config.ota.file_size = 0;
@@ -90,11 +64,9 @@ static void on_update_button_clicked(lv_event_t *e) {
     Serial.println("Update button event triggered");
 
     ota_update::FirmwareInfo info = {};
-    if (!load_pending_update_info(info)) {
-        if (!ota_update::check_for_update(info)) {
-            Serial.println("Failed to check for updates");
-            return;
-        }
+    if (!ota_update::check_for_update(info)) {
+        Serial.printf("Failed to check for updates: %s\n", ota_update::get_error_message());
+        return;
     }
 
     if (!info.has_update || info.download_url[0] == '\0') {
@@ -169,9 +141,6 @@ void setup() {
 
 void loop() {
     app_logic_update();
-
-    if (app_logic_should_refresh_display()) {
-        lv_timer_handler();
-    }
+    lv_timer_handler();
     delay(5);
 }

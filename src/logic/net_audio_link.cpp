@@ -1988,7 +1988,7 @@ void maybe_log_audio_stats() {
     g_last_audio_stats_log_at_ms = now;
 
     const auto rt = live_audio::stats();
-    Serial.printf("[NET][AUDIO-Q] loop_max_us=%lu over50=%lu over100=%lu rx_gap_max_ms=%lu over150=%lu rx_overwrite=%lu rx_expired=%lu underrun=%lu plc=%lu write_max_us=%lu captured=%lu expected=%lu estimated_lost=%lu decoded=%lu decode_err=%lu i2s_err=%lu tx=%lu retry=%lu tx_fail=%lu internal_free=%u internal_min=%u\n",
+    Serial.printf("[NET][AUDIO-Q] loop_max_us=%lu over50=%lu over100=%lu rx_gap_max_ms=%lu over150=%lu rx_overwrite=%lu rx_expired=%lu underrun=%lu plc=%lu write_max_us=%lu captured=%lu expected=%lu estimated_lost=%lu decoded=%lu decode_err=%lu i2s_err=%lu tx=%lu retry=%lu tx_fail=%lu rx_stack_hw=%lu tx_stack_hw=%lu internal_free=%u internal_min=%u\n",
         (unsigned long)g_loop_max_us, (unsigned long)g_loop_over50, (unsigned long)g_loop_over100,
         (unsigned long)rt.rx_gap_max_ms, (unsigned long)rt.rx_gap_over150,
         (unsigned long)rt.rx_overwrite, (unsigned long)rt.rx_expired, (unsigned long)rt.underruns,
@@ -1997,6 +1997,7 @@ void maybe_log_audio_stats() {
         (unsigned long)(rt.expected_samples > rt.captured_samples ? rt.expected_samples - rt.captured_samples : 0),
         (unsigned long)rt.decoded, (unsigned long)rt.decode_errors, (unsigned long)rt.i2s_errors,
         (unsigned long)rt.tx_packets, (unsigned long)rt.tx_retries, (unsigned long)rt.tx_errors,
+        (unsigned long)rt.rx_stack_high_water, (unsigned long)rt.tx_stack_high_water,
         heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
         heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
 }

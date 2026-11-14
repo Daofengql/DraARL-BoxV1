@@ -8,6 +8,12 @@
 #include <atomic>
 #include <cstring>
 
+#if __has_include(<esp_heap_caps.h>)
+#define DRAARL_RUNTIME_ESP_DIAGNOSTICS 1
+#else
+#define DRAARL_RUNTIME_ESP_DIAGNOSTICS 0
+#endif
+
 namespace live_audio {
 namespace {
 #ifndef DRAARL_AUDIO_JITTER_BUFFER
@@ -16,6 +22,7 @@ namespace {
 constexpr int frame_samples = 960, chunk_samples = 80, max_frame_samples = 1920;
 QueueHandle_t rx_queue = nullptr;
 TaskHandle_t rx_task_handle = nullptr;
+TaskHandle_t tx_task_handle = nullptr;
 OpusEncoder *encoder = nullptr;
 OpusDecoder *decoder = nullptr;
 Sender sender = nullptr;
@@ -28,7 +35,21 @@ struct Counters {
     std::atomic<uint32_t> rx_gap_max_ms{0}, rx_gap_over150{0};
     std::atomic<uint32_t> captured_samples{0}, expected_samples{0}, encoded{0}, encode_errors{0};
     std::atomic<uint32_t> tx_packets{0}, tx_bytes{0}, tx_errors{0}, tx_retries{0};
+    std::atomic<uint32_t> rx_stack_high_water{0}, tx_stack_high_water{0};
 } counters;
+
+template <typename Counter>
+void sample_stack_high_water(Counter &counter) {
+#if DRAARL_RUNTIME_ESP_DIAGNOSTICS
+    const uint32_t remaining = static_cast<uint32_t>(uxTaskGetStackHighWaterMark(nullptr));
+    uint32_t previous = counter.load();
+    while ((previous == 0 || remaining < previous) &&
+           !counter.compare_exchange_weak(previous, remaining)) {
+    }
+#else
+    (void)counter;
+#endif
+}
 bool current(uint32_t value) { return online && value == stream_epoch.load(); }
 bool playable(const Packet &p) { return current(p.epoch) && playing && millis() - p.created_ms <= max_age_ms; }
 
@@ -88,8 +109,14 @@ bool play_frame(const Packet &packet, const uint8_t *data, size_t length, bool c
 void rx_worker(void *) {
     Packet packet;
     uint32_t decoded_epoch = 0, last_decode = 0;
+    uint32_t last_stack_sample = 0;
     bool empty = false;
     for (;;) {
+        const uint32_t now = millis();
+        if (now - last_stack_sample >= 5000) {
+            sample_stack_high_water(counters.rx_stack_high_water);
+            last_stack_sample = now;
+        }
         if (!playing) {
             ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(20));
             continue;
@@ -138,9 +165,15 @@ void tx_worker(void *) {
     size_t filled = 0, payload_size = 0;
     unsigned frames = 0;
     uint32_t capture_epoch = 0, previous = millis();
+    uint32_t last_stack_sample = 0;
     bool was_active = false;
     TxPacer pacer;
     for (;;) {
+        const uint32_t stack_now = millis();
+        if (stack_now - last_stack_sample >= 5000) {
+            sample_stack_high_water(counters.tx_stack_high_water);
+            last_stack_sample = stack_now;
+        }
         const auto read_epoch = stream_epoch.load();
         size_t received = 0;
         const bool ok = i2s_read_timeout(stereo, sizeof(stereo), &received, pdMS_TO_TICKS(20));
@@ -217,7 +250,7 @@ bool init(OpusEncoder *tx_encoder, OpusDecoder *rx_decoder, Sender send) {
     if (!encoder || !decoder || !sender || !rx_queue)
         return false;
     if (xTaskCreatePinnedToCore(rx_worker, "rf-audio-rx", 24576, nullptr, 6, &rx_task_handle, 1) != pdPASS ||
-        xTaskCreatePinnedToCore(tx_worker, "rf-audio-tx", 24576, nullptr, 5, nullptr, 1) != pdPASS)
+        xTaskCreatePinnedToCore(tx_worker, "rf-audio-tx", 24576, nullptr, 5, &tx_task_handle, 1) != pdPASS)
         return false;
     ready = true;
     return true;
@@ -284,6 +317,7 @@ Stats stats() {
     COPY(decoded); COPY(decode_errors); COPY(i2s_errors); COPY(write_max_us);
     COPY(rx_gap_max_ms); COPY(rx_gap_over150); COPY(captured_samples); COPY(expected_samples);
     COPY(encoded); COPY(encode_errors); COPY(tx_packets); COPY(tx_bytes); COPY(tx_errors); COPY(tx_retries);
+    COPY(rx_stack_high_water); COPY(tx_stack_high_water);
 #undef COPY
     return value;
 }

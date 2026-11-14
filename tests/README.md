@@ -12,6 +12,6 @@ ctest --test-dir build/host-tests --output-on-failure
 
 Windows 可通过 `-DOPUS_INCLUDE_DIR=... -DOPUS_LIBRARY=...` 指向主机版 Opus 头文件和库；固件的 Xtensa 库不能用于主机测试。I2S 替身按每 5ms 一块持续产出，避免 Windows 计时器粒度改变模拟采样率。
 
-固件串行构建：`pio run -e esp32s3-n16r8 -j 1`。三个 A/B 环境见 `platformio.ini`；默认仅构建普通固件，BLE 释放仍默认关闭。先在 S3 板上验证释放后重新配网，再启用 `DRAARL_BLE_RELEASE_AFTER_WIFI=1`。
+固件串行构建：`pio run -e esp32s3-n16r8 -j 1`。三个 A/B 环境见 `platformio.ini`；默认固件现在也会在 WiFi 连接后释放 BLE 并关闭 WiFi modem sleep。BLE 释放后的重新配网仍需在 S3 板上验证；可用 `DRAARL_BLE_RELEASE_AFTER_WIFI=0` 回到仅保留 BLE 的对照环境。
 
-主机测试不验证真实任务调度、DMA 内部堆、PTT 电气时序或 BLE/WiFi 共存。`underruns` 为软件队列取空次数，包含语音尾部，不是硬件 DMA 欠载中断计数。`expected_samples` 为 SQL 有效窗口的时间估算，应与 `captured_samples`、编码耗时和板上听感一起判读。
+主机测试不验证真实任务调度、DMA 内部堆、PTT 电气时序或 BLE/WiFi 共存。`underruns` 为软件队列取空次数，包含语音尾部，不是硬件 DMA 欠载中断计数。固件日志中的 `rx_stack_hw`/`tx_stack_hw` 是任务栈最低剩余字数，`internal_free`/`internal_min` 是运行时内部堆快照，必须结合 S3 板上持续运行数据判读。`expected_samples` 为 SQL 有效窗口的时间估算，应与 `captured_samples`、编码耗时和板上听感一起判读。

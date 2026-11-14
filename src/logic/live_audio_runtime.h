@@ -9,6 +9,7 @@ struct Stats {
     uint32_t rx_gap_max_ms = 0, rx_gap_over150 = 0;
     uint32_t captured_samples = 0, expected_samples = 0, encoded = 0, encode_errors = 0;
     uint32_t tx_packets = 0, tx_bytes = 0, tx_errors = 0, tx_retries = 0;
+    uint32_t rx_stack_high_water = 0, tx_stack_high_water = 0;
 };
 using Sender = bool (*)(const uint8_t *, size_t, uint32_t epoch);
 bool init(OpusEncoder *encoder, OpusDecoder *decoder, Sender sender);

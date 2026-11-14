@@ -4,9 +4,9 @@
 #include <ArduinoJson.h>
 #include <NimBLEDevice.h>
 
-// Enable only for the documented board A/B test: S3 BLE re-init needs hardware validation.
+// Default firmware releases BLE after Wi-Fi connects; set to 0 for the coexistence A/B control.
 #ifndef DRAARL_BLE_RELEASE_AFTER_WIFI
-#define DRAARL_BLE_RELEASE_AFTER_WIFI 0
+#define DRAARL_BLE_RELEASE_AFTER_WIFI 1
 #endif
 #include <WiFi.h>
 #include <esp_heap_caps.h>

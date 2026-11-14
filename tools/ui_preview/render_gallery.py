@@ -40,7 +40,7 @@ for name, title, detail in rows:
 <p>{detail}</p><a class="original" href="{name}@3x.png" target="_blank">打开 3 倍原图 ↗</a></article>''')
 
 page = '''<!doctype html><html lang="zh-CN"><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1"><title>RFBox · LVGL 详细页面</title>
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>BoxV1 · LVGL 详细页面</title>
 <style>
 *{box-sizing:border-box}html{scroll-behavior:smooth;scroll-padding-top:20px}
 body{margin:0;background:#0e151f;color:#e6edf5;font:15px/1.7 system-ui,sans-serif}
@@ -56,7 +56,7 @@ article{background:#182331;border:1px solid #2a3b4d;padding:20px;border-radius:1
 h2{font-size:18px;margin:0 0 16px}article img{display:block;width:100%;height:auto;image-rendering:pixelated;background:#000;border-radius:3px}
 article p{color:#a8bbce;font-size:14px;min-height:48px}.original{font-size:13px}
 @media(max-width:850px){.layout{display:block}nav{display:none}main{grid-template-columns:1fr}header{padding-top:24px}}
-</style><header><h1>RFBox · LVGL 详细页面</h1>
+</style><header><h1>BoxV1 · LVGL 详细页面</h1>
 <p>29 个页面与操作状态，使用固件实际 LVGL、编辑控制器及编码器代码离屏渲染。点击画面可查看 960 × 720 原图。</p>
 <div class="rules"><span>旋转：选择 / 调值</span><span>按下：进入 / 确认</span><span>KEY0：返回 / 取消</span><span>长按 KEY0：电源菜单</span><span class="selected">青色：选中</span><span class="editing">橙色：编辑</span></div>
 <p>频率选位包含 Save，长按旋钮也可保存。这里展示已渲染的状态；GPIO、真实屏幕和 BLE 仍需设备联调。</p>

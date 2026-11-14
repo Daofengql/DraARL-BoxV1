@@ -15,6 +15,7 @@ namespace rf_test {
 struct Stop {};
 inline std::atomic<bool> stopping{false}, sql{false};
 inline std::atomic<unsigned> reads{0}, writes{0};
+inline std::atomic<unsigned> notification_waits{0};
 inline std::mutex lock;
 inline std::condition_variable changed;
 inline bool pause_output = false, output_entered = false;
@@ -100,6 +101,8 @@ inline void xTaskNotifyGive(TaskHandle_t task) {
 inline unsigned ulTaskNotifyTake(int clear, TickType_t time) {
     auto *task = rf_test::current_task;
     std::unique_lock<std::mutex> guard(task->lock);
+    ++rf_test::notification_waits;
+    rf_test::changed.notify_all();
     task->changed.wait_for(guard, std::chrono::milliseconds(time), [&] {
         return task->notifications || rf_test::stopping;
     });

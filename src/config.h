@@ -5,9 +5,13 @@
 //                       固件版本
 // ===================================================================
 #define FIRMWARE_VERSION "0.0.13"
-#define DEVICE_MODEL_RF 1
-#define DEVICE_MODEL_NO_RF 2
-#define DEVICE_MODEL DEVICE_MODEL_RF
+#define DEVICE_MODEL_BOXV1_RF 1
+#define DEVICE_MODEL_BOXV1_EX 2
+#define DEVICE_MODEL DEVICE_MODEL_BOXV1_RF
+
+// Source-compatible aliases for older integrations. Box32 uses IDs 3-5.
+#define DEVICE_MODEL_RF DEVICE_MODEL_BOXV1_RF
+#define DEVICE_MODEL_NO_RF DEVICE_MODEL_BOXV1_EX
 
 // ===================================================================
 //                       显示屏配置

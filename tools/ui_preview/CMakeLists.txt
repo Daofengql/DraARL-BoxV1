@@ -1,15 +1,15 @@
 cmake_minimum_required(VERSION 3.18)
-project(rfbox_ui_preview C CXX)
+project(boxv1_ui_preview C CXX)
 set(CMAKE_C_STANDARD 99)
 set(CMAKE_CXX_STANDARD 17)
-get_filename_component(RFBOX_ROOT "../.." ABSOLUTE BASE_DIR "${CMAKE_CURRENT_SOURCE_DIR}")
-file(GLOB_RECURSE LVGL_SOURCES CONFIGURE_DEPENDS "${RFBOX_ROOT}/lib/Lvgl/src/*.c")
-file(GLOB UI_SOURCES CONFIGURE_DEPENDS "${RFBOX_ROOT}/src/ui/*.c")
+get_filename_component(BOXV1_ROOT "../.." ABSOLUTE BASE_DIR "${CMAKE_CURRENT_SOURCE_DIR}")
+file(GLOB_RECURSE LVGL_SOURCES CONFIGURE_DEPENDS "${BOXV1_ROOT}/lib/Lvgl/src/*.c")
+file(GLOB UI_SOURCES CONFIGURE_DEPENDS "${BOXV1_ROOT}/src/ui/*.c")
 add_executable(ui_preview main.cpp host_support.cpp ${LVGL_SOURCES} ${UI_SOURCES}
-    "${RFBOX_ROOT}/src/logic/edit_controller.cpp"
-    "${RFBOX_ROOT}/src/drivers/ec11_driver.cpp")
+    "${BOXV1_ROOT}/src/logic/edit_controller.cpp"
+    "${BOXV1_ROOT}/src/drivers/ec11_driver.cpp")
 target_compile_definitions(ui_preview PRIVATE LV_CONF_PATH=${CMAKE_CURRENT_SOURCE_DIR}/lv_conf.h)
-target_include_directories(ui_preview PRIVATE host "${RFBOX_ROOT}/lib/Lvgl" "${RFBOX_ROOT}/src/ui")
+target_include_directories(ui_preview PRIVATE host "${BOXV1_ROOT}/lib/Lvgl" "${BOXV1_ROOT}/src/ui")
 enable_testing()
 add_test(NAME input_and_navigation COMMAND ui_preview --test)
 if(NOT MSVC)

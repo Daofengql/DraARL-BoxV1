@@ -1541,7 +1541,7 @@ bool build_radio_config_payload(uint8_t *payload, size_t payload_cap, size_t &pa
         return true;
     };
 
-    if (edit_controller_get_device_model() == DEVICE_MODEL_RF) {
+    if (edit_controller_get_device_model() == DEVICE_MODEL_BOXV1_RF) {
         write_u64_be(buffer8, static_cast<uint64_t>(config.rx_frequency_x10000) * 100ULL);
         if (!append_tlv_with_count(CONFIG_TLV_RX_FREQ, buffer8, sizeof(buffer8))) return false;
 
@@ -1586,7 +1586,7 @@ bool build_radio_config_payload(uint8_t *payload, size_t payload_cap, size_t &pa
     buffer1[0] = config.dac_volume;
     if (!append_tlv_with_count(CONFIG_TLV_DAC_VOLUME, buffer1, sizeof(buffer1))) return false;
 
-    if (edit_controller_get_device_model() == DEVICE_MODEL_NO_RF) {
+    if (edit_controller_get_device_model() == DEVICE_MODEL_BOXV1_EX) {
         buffer1[0] = config.sql_active_high ? 1U : 0U;
         if (!append_tlv_with_count(CONFIG_TLV_SQL_ACTIVE_HIGH, buffer1, sizeof(buffer1))) return false;
 
@@ -1664,7 +1664,7 @@ bool handle_config_apply_payload(const uint8_t *data, size_t data_len) {
 
         const uint8_t *value = data + offset;
         if (type >= CONFIG_TLV_RX_FREQ && type <= CONFIG_TLV_TX_TONE_VALUE &&
-            edit_controller_get_device_model() != DEVICE_MODEL_RF) {
+            edit_controller_get_device_model() != DEVICE_MODEL_BOXV1_RF) {
             offset += value_len;
             continue;
         }
@@ -1778,7 +1778,7 @@ bool handle_config_apply_payload(const uint8_t *data, size_t data_len) {
                 if (value_len != 1 || value[0] > 1U) {
                     return false;
                 }
-                if (edit_controller_get_device_model() == DEVICE_MODEL_NO_RF) {
+                if (edit_controller_get_device_model() == DEVICE_MODEL_BOXV1_EX) {
                     updated.sql_active_high = value[0] != 0;
                     saw_radio_field = true;
                 }
@@ -1787,7 +1787,7 @@ bool handle_config_apply_payload(const uint8_t *data, size_t data_len) {
                 if (value_len != 1 || value[0] > 1U) {
                     return false;
                 }
-                if (edit_controller_get_device_model() == DEVICE_MODEL_NO_RF) {
+                if (edit_controller_get_device_model() == DEVICE_MODEL_BOXV1_EX) {
                     updated.ptt_active_high = value[0] != 0;
                     saw_radio_field = true;
                 }

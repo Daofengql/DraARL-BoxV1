@@ -139,6 +139,11 @@ static void raw_frame_and_arrival_gap(const std::vector<uint8_t> &packet) {
 }
 static void overload_and_cancellation(const std::vector<uint8_t> &packet) {
     using namespace live_audio;
+    // stop_playback cancels work before the worker leaves its timed queue wait.
+    // Wait for the idle loop before asserting an exact number of evictions.
+    const auto idle = rf_test::notification_waits.load();
+    stop_playback();
+    CHECK(rf_test::wait_for([&] { return rf_test::notification_waits > idle; }));
     const auto overwritten = stats().rx_overwrite;
     for (unsigned i = 0; i < rx_capacity + 2; ++i)
         CHECK(enqueue(packet.data(), packet.size()));

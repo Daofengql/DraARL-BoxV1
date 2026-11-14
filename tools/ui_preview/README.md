@@ -1,4 +1,4 @@
-# 本地渲染 RFBox 界面
+# 本地渲染 BoxV1 界面
 
 使用仓库内 LVGL 8.3、实际 `src/ui`、`edit_controller.cpp` 和 `ec11_driver.cpp`，离屏渲染 320×240 RGB565 页面，无需设备或 SDL。硬件、存储和网络边界在 `host_support.cpp` 模拟，页面导航使用生产控制器输入事件。
 

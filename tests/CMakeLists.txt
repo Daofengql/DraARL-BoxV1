@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(rf1_audio_tests LANGUAGES CXX)
+project(boxv1_audio_tests LANGUAGES CXX)
 enable_testing()
 find_package(Threads REQUIRED)
 find_path(OPUS_INCLUDE_DIR opus.h PATH_SUFFIXES opus)

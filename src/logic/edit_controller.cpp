@@ -1805,7 +1805,7 @@ bool edit_controller_boot_radio_init() {
         apply_board_io_polarity();
         Serial.println("SA818 init failed.");
         Serial.printf("Runtime device model=%u (SA818 unavailable).\n",
-                      static_cast<unsigned int>(DEVICE_MODEL_NO_RF));
+                      static_cast<unsigned int>(DEVICE_MODEL_BOXV1_EX));
         return false;
     }
 
@@ -1820,14 +1820,14 @@ bool edit_controller_boot_radio_init() {
     if (!at_ok) {
         Serial.println("SA818 AT probe failed.");
         Serial.printf("Runtime device model=%u (SA818 unavailable).\n",
-                      static_cast<unsigned int>(DEVICE_MODEL_NO_RF));
+                      static_cast<unsigned int>(DEVICE_MODEL_BOXV1_EX));
         return false;
     }
 
     radio_module_ready = true;
     apply_board_io_polarity();
     Serial.printf("Runtime device model=%u (SA818 detected).\n",
-                  static_cast<unsigned int>(DEVICE_MODEL_RF));
+                  static_cast<unsigned int>(DEVICE_MODEL_BOXV1_RF));
     sql_rx_active = sa818_is_rx();
 
     const bool cfg_ok = apply_all_radio_config_to_sa818();
@@ -1840,7 +1840,7 @@ bool edit_controller_boot_radio_init() {
 }
 
 uint8_t edit_controller_get_device_model() {
-    return radio_module_ready ? DEVICE_MODEL_RF : DEVICE_MODEL_NO_RF;
+    return radio_module_ready ? DEVICE_MODEL_BOXV1_RF : DEVICE_MODEL_BOXV1_EX;
 }
 
 void edit_controller_update() {

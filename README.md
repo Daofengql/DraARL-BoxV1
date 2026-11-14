@@ -1,6 +1,6 @@
-# DraARL RFBox-1 Firmware
+# DraARL BoxV1 Firmware
 
-**DraARL-RFBox-1** 是 DraARL 系列第一代 RFBox 终端固件。当前代码面向带 RF 的手持/台式实验硬件：ESP32-S3 N16R8 主控、ST7789 屏幕、EC11 旋钮、SA818 UHF 射频模块、ES8388 音频编解码器，并通过 Wi-Fi 接入 DraARL 服务端。
+**DraARL BoxV1** 是 DraARL 系列第一代 BoxV1-RF/EX 终端固件。当前代码面向带 RF 的手持/台式实验硬件：ESP32-S3 N16R8 主控、ST7789 屏幕、EC11 旋钮、SA818 UHF 射频模块、ES8388 音频编解码器，并通过 Wi-Fi 接入 DraARL 服务端。
 
 设备界面品牌正式使用 **DraARL**，项目归属 **DraARL 项目组**。
 
@@ -11,7 +11,7 @@
 3. 网络语音链路：DraARL UDP 鉴权、心跳、Opus 16 kHz 语音收发、网络到 RF 桥接。
 4. 设备运维：NVS 参数持久化、服务器配置同步、时间同步、OTA 检查与升级。
 
-当前固件版本定义在 [`src/config.h`](src/config.h)：`FIRMWARE_VERSION = 0.0.13`，`DEVICE_MODEL = 1`。
+当前固件版本定义在 [`src/config.h`](src/config.h)：`FIRMWARE_VERSION = 0.0.13`。检测到 SA818 时上报 `1 = BoxV1-RF`，未检测到时上报 `2 = BoxV1-EX`，编号与原固件保持一致。仓库已从 `DraARL-RFBox-1` 更名为 `DraARL-BoxV1`；Box32 系列另用 `3/4/5`，不复用这两个型号。
 
 ## 授权协议
 
@@ -19,7 +19,7 @@
 
 - 允许个人学习、研究、实验和非商业二次开发。
 - 禁止未经授权的商业使用、商用收费、商业集成或商业分发。
-- 二次开发、修改版或再分发版本必须保留 `LICENSE` 中的 `Required Notice:` 行，并明确标注原仓库地址：`https://github.com/Daofengql/DraARL-RFBox-1`。
+- 二次开发、修改版或再分发版本必须保留 `LICENSE` 中的 `Required Notice:` 行；其中的原仓库地址会重定向至当前仓库 `https://github.com/Daofengql/DraARL-BoxV1`。
 - 由于包含非商业限制，本项目更准确地说是 source-available / non-commercial source license，不是 OSI 定义下的开放源代码许可。
 
 ## 当前能力
@@ -363,8 +363,8 @@ OTA 逻辑由 [`src/logic/ota_update.cpp`](src/logic/ota_update.cpp) 实现。
 仓库地址：
 
 ```bash
-git clone git@github.com:Daofengql/DraARL-RFBox-1.git
-cd DraARL-RFBox-1
+git clone git@github.com:Daofengql/DraARL-BoxV1.git
+cd DraARL-BoxV1
 ```
 
 环境名：`esp32s3-n16r8`

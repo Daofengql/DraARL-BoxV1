@@ -4,6 +4,7 @@
 #include <cctype>
 #include <cstdio>
 #include <cstring>
+#include <atomic>
 
 // 模块配置
 static SA818Type module_type = SA818Type::SA818_UHF;
@@ -16,7 +17,7 @@ static bool is_wide_band = false;
 static bool is_tx = false;
 static bool is_enabled = false;
 static bool module_present = false;
-static bool sql_active_high = false;
+static std::atomic<bool> sql_active_high{false};
 static bool ptt_active_high = false;
 
 // 频率配置

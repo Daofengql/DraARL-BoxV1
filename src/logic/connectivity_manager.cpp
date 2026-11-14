@@ -3,6 +3,11 @@
 #include <Arduino.h>
 #include <ArduinoJson.h>
 #include <NimBLEDevice.h>
+
+// Enable only for the documented board A/B test: S3 BLE re-init needs hardware validation.
+#ifndef DRAARL_BLE_RELEASE_AFTER_WIFI
+#define DRAARL_BLE_RELEASE_AFTER_WIFI 0
+#endif
 #include <WiFi.h>
 #include <esp_heap_caps.h>
 #include <lvgl.h>
@@ -1017,12 +1022,24 @@ void disable_ble() {
     g_ble_authenticated = false;
     g_ble_idle_since_ms = 0;
     reset_ble_rpc();
+#if DRAARL_BLE_RELEASE_AFTER_WIFI
+    if (g_ble_stack_initialized) {
+        BLEDevice::deinit(true);
+        g_ble_stack_initialized = false;
+        g_ble_server = nullptr;
+        g_ble_service = nullptr;
+        g_ble_advertising = nullptr;
+        g_ble_status_char = g_ble_auth_char = g_ble_rpc_tx_char = g_ble_rpc_rx_char = nullptr;
+    }
+    WiFi.setSleep(false);
+#endif
     notify_status();
     Serial.println("[BLE] Disabled.");
 }
 
 void enable_ble(const char *reason, bool show_popup) {
     generate_auth_code();
+    WiFi.setSleep(true);
     init_ble_stack();
     start_ble_advertising();
 
@@ -1184,7 +1201,7 @@ void connectivity_manager_update() {
         g_wifi_boot_popup_allowed = false;
         g_wifi_boot_failures = 0;
         g_wifi_rssi = WiFi.RSSI();
-        if (g_ble_enabled) {
+        if (g_ble_enabled || (DRAARL_BLE_RELEASE_AFTER_WIFI && g_ble_stack_initialized)) {
             disable_ble();
         }
         notify_status();

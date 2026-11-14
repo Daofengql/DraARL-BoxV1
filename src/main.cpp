@@ -1,3 +1,4 @@
+#include "logic/net_audio_link.h"
 #include <Arduino.h>
 #include <lvgl.h>
 
@@ -140,7 +141,9 @@ void setup() {
 }
 
 void loop() {
+    const uint32_t started = micros();
     app_logic_update();
     lv_timer_handler();
     delay(5);
+    net_audio_link_record_loop(micros() - started);
 }

@@ -2,9 +2,10 @@
 #include "../config.h"
 #include <string.h>
 #include <stdlib.h>
+#include <atomic>
 
-static uint8_t current_volume = 100;
-static bool is_muted = false;
+static std::atomic<uint8_t> current_volume{100};
+static std::atomic<bool> is_muted{false};
 
 bool i2s_driver_init(void) {
     i2s_config_t i2s_config = {
@@ -69,13 +70,14 @@ bool i2s_write(const void *data, size_t len, size_t *bytes_written) {
 
     // 应用软件音量。分块缩放到栈上的固定缓冲，避免在音频路径上做堆分配
     // （原实现每帧 malloc/free 一次，既有碎片风险也可能在分配失败时静默跳过缩放）。
-    if (current_volume < 100) {
+    const uint8_t volume = current_volume.load();
+    if (volume < 100) {
         static constexpr size_t CHUNK_SAMPLES = 256;
         int16_t chunk[CHUNK_SAMPLES];
 
         const int16_t *source = (const int16_t *)data;
         const size_t total_samples = len / sizeof(int16_t);
-        const float scale = current_volume / 100.0f;
+        const float scale = volume / 100.0f;
         size_t done_samples = 0;
 
         *bytes_written = 0;
@@ -92,9 +94,9 @@ bool i2s_write(const void *data, size_t len, size_t *bytes_written) {
                                         chunk,
                                         batch * sizeof(int16_t),
                                         &chunk_written,
-                                        portMAX_DELAY);
+                                        pdMS_TO_TICKS(20));
             *bytes_written += chunk_written;
-            if (ret != ESP_OK) {
+            if (ret != ESP_OK || chunk_written != batch * sizeof(int16_t)) {
                 return false;
             }
             done_samples += batch;
@@ -102,8 +104,8 @@ bool i2s_write(const void *data, size_t len, size_t *bytes_written) {
         return true;
     }
 
-    esp_err_t ret = ::i2s_write(I2S_PORT_NUM, data, len, bytes_written, portMAX_DELAY);
-    return ret == ESP_OK;
+    esp_err_t ret = ::i2s_write(I2S_PORT_NUM, data, len, bytes_written, pdMS_TO_TICKS(20));
+    return ret == ESP_OK && *bytes_written == len;
 }
 
 bool i2s_read(void *data, size_t len, size_t *bytes_read) {

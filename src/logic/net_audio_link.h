@@ -2,10 +2,12 @@
 #define NET_AUDIO_LINK_H
 
 #include "access_point_discovery.h"
+#include <cstdint>
 
 bool net_audio_link_init();
 void net_audio_link_on_main_screen_enter();
 void net_audio_link_update();
+void net_audio_link_record_loop(uint32_t elapsed_us);
 void net_audio_link_schedule_radio_config_sync();
 void net_audio_link_reload_server_config();
 void net_audio_link_hide_bind_popup();

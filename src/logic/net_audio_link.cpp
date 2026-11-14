@@ -8,8 +8,12 @@
 #include <WiFiClientSecure.h>
 #include <WiFiUdp.h>
 #include <esp_system.h>
+#include <esp_heap_caps.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
+#include <freertos/semphr.h>
+#include <atomic>
+#include "live_audio_runtime.h"
 #include <lvgl.h>
 #include <opus.h>
 
@@ -53,14 +57,9 @@ constexpr uint8_t HEARTBEAT_STATUS_AUTH_FAILED = 3;
 
 constexpr uint32_t OPUS_SAMPLE_RATE = 16000;
 constexpr uint8_t OPUS_CHANNELS = 1;
-constexpr int OPUS_FRAME_SAMPLES_MAX = 1920;  // 120ms @ 16kHz
-constexpr int OPUS_TX_FRAME_SAMPLES = 960;    // 60ms @ 16kHz
-constexpr uint8_t OPUS_TX_FRAMES_PER_PACKET = 2;  // server usually expects two 60ms frames merged
-constexpr size_t OPUS_TX_MAX_BYTES = 400;
 constexpr size_t OPUS_TX_MERGED_MAX_BYTES = DRA_MAX_PACKET_SIZE - DRA_HEADER_SIZE;
 constexpr int OPUS_BITRATE = 24000;
 constexpr int OPUS_COMPLEXITY = 1;
-constexpr int RT_PCM_WORK_SAMPLES = OPUS_FRAME_SAMPLES_MAX * 2;
 
 constexpr uint32_t HTTP_RETRY_MS = 5000;
 constexpr uint32_t HTTP_GATE_WAIT_MS = 1500;
@@ -81,9 +80,8 @@ constexpr uint32_t VOICE_TX_TIMEOUT_MS = 600;
 constexpr uint32_t VOICE_BRIDGE_PTT_SETTLE_MS = 20;
 constexpr uint32_t RF_CAPTURE_RESUME_MIN_GUARD_MS = 900;
 constexpr uint32_t RF_CAPTURE_SQL_QUIET_MS = 250;
-constexpr bool AUDIO_STATS_LOG_ENABLED = false;
+constexpr bool AUDIO_STATS_LOG_ENABLED = true;
 constexpr uint32_t AUDIO_STATS_LOG_INTERVAL_MS = 5000;
-constexpr uint32_t AUDIO_ERROR_LOG_INTERVAL_MS = 2000;
 
 constexpr uint8_t CONFIG_CMD_QUERY = 0x01;
 constexpr uint8_t CONFIG_CMD_APPLY = 0x02;
@@ -169,27 +167,9 @@ struct DraPacketHeader {
 };
 
 struct AudioRxStats {
-    uint32_t packets_type5 = 0;
-    uint32_t packets_type6 = 0;
-    uint32_t audio_payload_bytes = 0;
-    uint32_t decoded_frames_ok = 0;
-    uint32_t decode_fail = 0;
-    uint32_t i2s_fail = 0;
-    uint32_t audio_not_ready = 0;
-    uint32_t merged_parse_fail = 0;
-    uint32_t server_voice_short = 0;
-    uint32_t editing_drop = 0;
+    uint32_t packets_type5 = 0, packets_type6 = 0, audio_payload_bytes = 0;
+    uint32_t server_voice_short = 0, editing_drop = 0;
 };
-
-struct AudioTxStats {
-    uint32_t frames_read_ok = 0;
-    uint32_t packets_sent_ok = 0;
-    uint32_t payload_bytes_sent = 0;
-    uint32_t i2s_read_fail = 0;
-    uint32_t encode_fail = 0;
-    uint32_t udp_send_fail = 0;
-};
-
 
 struct AudioCodecConfig {
     uint8_t adc_gain_db = device_config::ADC_GAIN_DEFAULT_DB;
@@ -242,31 +222,17 @@ bool g_bind_accepted = false;
 VoiceBridgeState g_voice_state = VoiceBridgeState::IDLE;
 uint32_t g_last_voice_packet_at_ms = 0;
 AudioRxStats g_audio_rx_stats = {};
-AudioTxStats g_audio_tx_stats = {};
 uint32_t g_last_audio_stats_log_at_ms = 0;
-uint32_t g_last_audio_not_ready_log_at_ms = 0;
-uint32_t g_last_decode_fail_log_at_ms = 0;
-uint32_t g_last_i2s_fail_log_at_ms = 0;
-uint32_t g_last_i2s_read_fail_log_at_ms = 0;
-uint32_t g_last_encode_fail_log_at_ms = 0;
-uint32_t g_last_udp_send_fail_log_at_ms = 0;
 uint32_t g_rf_capture_block_until_ms = 0;
 uint32_t g_rf_capture_sql_quiet_since_ms = 0;
 bool g_rf_capture_wait_sql_clear = false;
 bool g_rf_capture_adc_muted = false;
 
-// Half-duplex runtime workspace:
-// One packet buffer + one PCM buffer are time-division multiplexed by RX/TX/decode path.
-uint8_t g_rt_packet_buffer[DRA_MAX_PACKET_SIZE] = {0};
-int16_t g_rt_pcm_work[RT_PCM_WORK_SAMPLES] = {0};
-int16_t g_tx_pcm_mono[OPUS_TX_FRAME_SAMPLES] = {0};
-// 采集帧累积缓冲：i2s 用零超时轮询，不足一帧的部分留到下一轮主循环。
-int16_t g_tx_capture_accum[OPUS_TX_FRAME_SAMPLES * 2] = {0};
-size_t g_tx_capture_accum_bytes = 0;
-uint8_t g_tx_opus_buffer[OPUS_TX_MAX_BYTES] = {0};
-uint8_t g_tx_merged_payload[OPUS_TX_MERGED_MAX_BYTES] = {0};
-size_t g_tx_merged_payload_len = 0;
-uint8_t g_tx_merged_frame_count = 0;
+// The loop owns receive/control datagrams. The TX task uses its own packet buffer.
+uint8_t g_rt_packet_buffer[DRA_MAX_PACKET_SIZE] = {};
+uint8_t g_tx_header[DRA_HEADER_SIZE] = {};
+SemaphoreHandle_t g_udp_lock = nullptr;
+uint32_t g_loop_max_us = 0, g_loop_over50 = 0, g_loop_over100 = 0;
 
 lv_obj_t *g_bind_popup = nullptr;
 lv_obj_t *g_bind_code_label = nullptr;
@@ -1097,6 +1063,7 @@ bool should_suppress_rf_capture(uint32_t now_ms, bool sql_active) {
 
 void stop_voice_bridge() {
     const uint32_t now_ms = millis();
+    live_audio::stop_playback();
     const bool was_active = (g_voice_state == VoiceBridgeState::NET_TO_RF_ACTIVE);
     if (was_active) {
         sa818_stop_tx();
@@ -1132,24 +1099,23 @@ void check_voice_timeout() {
         return;
     }
     const uint32_t now = millis();
-    if ((now - g_last_voice_packet_at_ms) > VOICE_TX_TIMEOUT_MS) {
+    const uint32_t played = live_audio::last_playback_ms();
+    if ((now - g_last_voice_packet_at_ms) > VOICE_TX_TIMEOUT_MS &&
+        (!played || now - played > VOICE_TX_TIMEOUT_MS)) {
         stop_voice_bridge();
     }
 }
 
-void reset_tx_audio_merge() {
-    g_tx_merged_payload_len = 0;
-    g_tx_merged_frame_count = 0;
-    g_tx_capture_accum_bytes = 0;
-}
-
 void close_udp_session() {
+    live_audio::set_online(false);
     stop_voice_bridge();
     stop_active_ap_rtt_probe();
+    xSemaphoreTake(g_udp_lock, portMAX_DELAY);
     if (g_udp_open) {
         g_udp.stop();
     }
     g_udp_open = false;
+    xSemaphoreGive(g_udp_lock);
     g_server_ip = IPAddress();
     g_server_port = 0;
     g_local_port = 0;
@@ -1157,15 +1123,7 @@ void close_udp_session() {
     g_last_heartbeat_at_ms = 0;
     g_last_heartbeat_reply_at_ms = 0;
     memset(&g_audio_rx_stats, 0, sizeof(g_audio_rx_stats));
-    memset(&g_audio_tx_stats, 0, sizeof(g_audio_tx_stats));
     g_last_audio_stats_log_at_ms = 0;
-    g_last_audio_not_ready_log_at_ms = 0;
-    g_last_decode_fail_log_at_ms = 0;
-    g_last_i2s_fail_log_at_ms = 0;
-    g_last_i2s_read_fail_log_at_ms = 0;
-    g_last_encode_fail_log_at_ms = 0;
-    g_last_udp_send_fail_log_at_ms = 0;
-    reset_tx_audio_merge();
     clear_rf_capture_suppression();
 }
 
@@ -1476,25 +1434,44 @@ size_t build_dra_packet(uint8_t type, const uint8_t *payload, size_t payload_len
     return total_len;
 }
 
+// The caller owns g_udp_lock. End even a short write to clear WiFiUDP's TX buffer.
+bool write_udp_packet(const uint8_t *packet, size_t size) {
+    if (!g_udp_open || !g_udp.beginPacket(g_server_ip, g_server_port)) return false;
+    const size_t written = g_udp.write(packet, size);
+    const int result = g_udp.endPacket();
+    return written == size && result == 1;
+}
+
 bool send_udp_packet(uint8_t type, const uint8_t *payload, size_t payload_len) {
-    if (!g_udp_open) {
-        return false;
-    }
+    uint8_t packet[DRA_MAX_PACKET_SIZE];
+    const size_t packet_len = build_dra_packet(type, payload, payload_len, packet, sizeof(packet));
+    if (!packet_len) return false;
+    xSemaphoreTake(g_udp_lock, portMAX_DELAY);
+    const bool ok = write_udp_packet(packet, packet_len);
+    xSemaphoreGive(g_udp_lock);
+    return ok;
+}
 
-    const size_t packet_len = build_dra_packet(type, payload, payload_len, g_rt_packet_buffer, sizeof(g_rt_packet_buffer));
-    if (packet_len == 0) {
-        return false;
-    }
+void refresh_tx_header() {
+    uint8_t header[DRA_HEADER_SIZE];
+    build_dra_packet(TYPE_OPUS_16K, nullptr, 0, header, sizeof(header));
+    xSemaphoreTake(g_udp_lock, portMAX_DELAY);
+    memcpy(g_tx_header, header, sizeof(header));
+    xSemaphoreGive(g_udp_lock);
+}
 
-    if (!g_udp.beginPacket(g_server_ip, g_server_port)) {
-        return false;
-    }
-    const size_t written = g_udp.write(g_rt_packet_buffer, packet_len);
-    if (written != packet_len) {
-        g_udp.endPacket();
-        return false;
-    }
-    return g_udp.endPacket() == 1;
+bool send_live_audio(const uint8_t *payload, size_t size, uint32_t epoch) {
+    uint8_t packet[DRA_MAX_PACKET_SIZE];
+    if (size > OPUS_TX_MERGED_MAX_BYTES) return false;
+    xSemaphoreTake(g_udp_lock, portMAX_DELAY);
+    memcpy(packet, g_tx_header, DRA_HEADER_SIZE);
+    memcpy(packet + DRA_HEADER_SIZE, payload, size);
+    const size_t length = DRA_HEADER_SIZE + size;
+    packet[4] = length >> 8;
+    packet[5] = length & 0xff;
+    const bool ok = live_audio::can_transmit(epoch) && write_udp_packet(packet, length);
+    xSemaphoreGive(g_udp_lock);
+    return ok;
 }
 
 size_t build_heartbeat_payload(uint8_t *payload, size_t payload_cap) {
@@ -2010,257 +1987,41 @@ void maybe_log_audio_stats() {
     }
     g_last_audio_stats_log_at_ms = now;
 
-    const unsigned long loop_stack_hw_bytes =
-        static_cast<unsigned long>(uxTaskGetStackHighWaterMark(nullptr)) * sizeof(StackType_t);
-
-    Serial.printf("[NET][AUDIO] p5=%lu p6=%lu bytes=%lu ok=%lu dec_fail=%lu i2s_fail=%lu not_ready=%lu parse_fail=%lu short6=%lu editing_drop=%lu tx_ok=%lu tx_bytes=%lu tx_read_fail=%lu tx_enc_fail=%lu tx_udp_fail=%lu stack_hw=%lu\n",
-                  static_cast<unsigned long>(g_audio_rx_stats.packets_type5),
-                  static_cast<unsigned long>(g_audio_rx_stats.packets_type6),
-                  static_cast<unsigned long>(g_audio_rx_stats.audio_payload_bytes),
-                  static_cast<unsigned long>(g_audio_rx_stats.decoded_frames_ok),
-                  static_cast<unsigned long>(g_audio_rx_stats.decode_fail),
-                  static_cast<unsigned long>(g_audio_rx_stats.i2s_fail),
-                  static_cast<unsigned long>(g_audio_rx_stats.audio_not_ready),
-                  static_cast<unsigned long>(g_audio_rx_stats.merged_parse_fail),
-                  static_cast<unsigned long>(g_audio_rx_stats.server_voice_short),
-                  static_cast<unsigned long>(g_audio_rx_stats.editing_drop),
-                  static_cast<unsigned long>(g_audio_tx_stats.packets_sent_ok),
-                  static_cast<unsigned long>(g_audio_tx_stats.payload_bytes_sent),
-                  static_cast<unsigned long>(g_audio_tx_stats.i2s_read_fail),
-                  static_cast<unsigned long>(g_audio_tx_stats.encode_fail),
-                  static_cast<unsigned long>(g_audio_tx_stats.udp_send_fail),
-                  loop_stack_hw_bytes);
+    const auto rt = live_audio::stats();
+    Serial.printf("[NET][AUDIO-Q] loop_max_us=%lu over50=%lu over100=%lu rx_gap_max_ms=%lu over150=%lu rx_overwrite=%lu rx_expired=%lu underrun=%lu plc=%lu write_max_us=%lu captured=%lu expected=%lu estimated_lost=%lu decoded=%lu decode_err=%lu i2s_err=%lu tx=%lu retry=%lu tx_fail=%lu internal_free=%u internal_min=%u\n",
+        (unsigned long)g_loop_max_us, (unsigned long)g_loop_over50, (unsigned long)g_loop_over100,
+        (unsigned long)rt.rx_gap_max_ms, (unsigned long)rt.rx_gap_over150,
+        (unsigned long)rt.rx_overwrite, (unsigned long)rt.rx_expired, (unsigned long)rt.underruns,
+        (unsigned long)rt.plc, (unsigned long)rt.write_max_us, (unsigned long)rt.captured_samples,
+        (unsigned long)rt.expected_samples,
+        (unsigned long)(rt.expected_samples > rt.captured_samples ? rt.expected_samples - rt.captured_samples : 0),
+        (unsigned long)rt.decoded, (unsigned long)rt.decode_errors, (unsigned long)rt.i2s_errors,
+        (unsigned long)rt.tx_packets, (unsigned long)rt.tx_retries, (unsigned long)rt.tx_errors,
+        heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+        heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
 }
 
-void maybe_capture_and_send_rf_audio() {
-    if (g_state != LinkState::RUNNING) {
-        reset_tx_audio_merge();
-        return;
-    }
-    if (!g_audio_ready || !g_opus_encoder || !g_udp_open) {
-        reset_tx_audio_merge();
-        return;
-    }
-    // Half-duplex: while NET->RF is active, do not sample/send RF->NET audio.
-    if (g_voice_state == VoiceBridgeState::NET_TO_RF_ACTIVE) {
-        reset_tx_audio_merge();
-        return;
-    }
-    // SQL active means RF module is currently receiving a valid signal.
-    const bool sql_active = sa818_is_rx();
+void service_audio_policy() {
     const uint32_t now = millis();
-    if (should_suppress_rf_capture(now, sql_active)) {
-        reset_tx_audio_merge();
-        return;
+    if (live_audio::prefill_ready(now)) {
+        if (mark_voice_packet_received()) live_audio::start_playback();
+        else live_audio::stop_playback();
     }
-    if (!sql_active) {
-        reset_tx_audio_merge();
-        return;
-    }
-
-    // 非阻塞累积：每轮主循环把 DMA 里现有的数据取走，攒够一帧再往下走。
-    // 原来用 portMAX_DELAY 一次索要 60 ms 的数据，等于在收信期间按 60 ms
-    // 为单位反复挂起主循环，LVGL 刷新和旋钮输入都会跟着卡。
-    const size_t stereo_bytes = sizeof(g_tx_capture_accum);
-    size_t bytes_read = 0;
-    const bool read_ok = i2s_read_timeout(
-        reinterpret_cast<uint8_t *>(g_tx_capture_accum) + g_tx_capture_accum_bytes,
-        stereo_bytes - g_tx_capture_accum_bytes,
-        &bytes_read,
-        0
-    );
-    if (!read_ok) {
-        ++g_audio_tx_stats.i2s_read_fail;
-        if ((now - g_last_i2s_read_fail_log_at_ms) >= AUDIO_ERROR_LOG_INTERVAL_MS) {
-            g_last_i2s_read_fail_log_at_ms = now;
-            Serial.printf("[NET][AUDIO][TX] i2s read failed: pending=%u need=%u\n",
-                          static_cast<unsigned int>(g_tx_capture_accum_bytes),
-                          static_cast<unsigned int>(stereo_bytes));
-        }
-        // 故意不清累积缓冲：万一驱动在零超时下用非 OK 表示「暂时没数据」，
-        // 清掉就会让这一帧永远攒不满、彻底发不出音频。
-        // 缓冲会在 SQL 关闭时由 reset_tx_audio_merge() 统一清理。
-        return;
-    }
-
-    g_tx_capture_accum_bytes += bytes_read;
-    if (g_tx_capture_accum_bytes < stereo_bytes) {
-        // 还没攒够一帧，让出主循环，下一轮接着取；已取到的部分不丢弃。
-        return;
-    }
-    g_tx_capture_accum_bytes = 0;
-    ++g_audio_tx_stats.frames_read_ok;
-
-    // Convert interleaved stereo PCM to mono for Opus 16k/1ch.
-    for (int i = 0; i < OPUS_TX_FRAME_SAMPLES; ++i) {
-        const int32_t left = static_cast<int32_t>(g_tx_capture_accum[i * 2]);
-        const int32_t right = static_cast<int32_t>(g_tx_capture_accum[i * 2 + 1]);
-        g_tx_pcm_mono[i] = static_cast<int16_t>((left + right) / 2);
-    }
-
-    const int encoded_len = opus_encode(
-        g_opus_encoder,
-        g_tx_pcm_mono,
-        OPUS_TX_FRAME_SAMPLES,
-        g_tx_opus_buffer,
-        static_cast<opus_int32>(sizeof(g_tx_opus_buffer))
-    );
-    if (encoded_len <= 0) {
-        ++g_audio_tx_stats.encode_fail;
-        reset_tx_audio_merge();
-        const uint32_t now = millis();
-        if ((now - g_last_encode_fail_log_at_ms) >= AUDIO_ERROR_LOG_INTERVAL_MS) {
-            g_last_encode_fail_log_at_ms = now;
-            Serial.printf("[NET][AUDIO][TX] opus encode failed: ret=%d\n", encoded_len);
-        }
-        return;
-    }
-
-    const size_t encoded_size = static_cast<size_t>(encoded_len);
-    const size_t merged_next_len = g_tx_merged_payload_len + 2U + encoded_size;
-    if (merged_next_len > sizeof(g_tx_merged_payload)) {
-        ++g_audio_tx_stats.udp_send_fail;
-        reset_tx_audio_merge();
-        const uint32_t now = millis();
-        if ((now - g_last_udp_send_fail_log_at_ms) >= AUDIO_ERROR_LOG_INTERVAL_MS) {
-            g_last_udp_send_fail_log_at_ms = now;
-            Serial.printf("[NET][AUDIO][TX] merged payload overflow: next=%u max=%u\n",
-                          static_cast<unsigned int>(merged_next_len),
-                          static_cast<unsigned int>(sizeof(g_tx_merged_payload)));
-        }
-        return;
-    }
-
-    g_tx_merged_payload[g_tx_merged_payload_len++] = static_cast<uint8_t>((encoded_size >> 8) & 0xFFU);
-    g_tx_merged_payload[g_tx_merged_payload_len++] = static_cast<uint8_t>(encoded_size & 0xFFU);
-    memcpy(g_tx_merged_payload + g_tx_merged_payload_len, g_tx_opus_buffer, encoded_size);
-    g_tx_merged_payload_len += encoded_size;
-    ++g_tx_merged_frame_count;
-
-    if (g_tx_merged_frame_count < OPUS_TX_FRAMES_PER_PACKET) {
-        return;
-    }
-
-    if (!send_udp_packet(TYPE_OPUS_16K, g_tx_merged_payload, g_tx_merged_payload_len)) {
-        ++g_audio_tx_stats.udp_send_fail;
-        reset_tx_audio_merge();
-        const uint32_t now = millis();
-        if ((now - g_last_udp_send_fail_log_at_ms) >= AUDIO_ERROR_LOG_INTERVAL_MS) {
-            g_last_udp_send_fail_log_at_ms = now;
-            Serial.println("[NET][AUDIO][TX] udp send failed.");
-        }
-        return;
-    }
-
-    ++g_audio_tx_stats.packets_sent_ok;
-    g_audio_tx_stats.payload_bytes_sent += static_cast<uint32_t>(g_tx_merged_payload_len);
-    reset_tx_audio_merge();
+    const bool allowed = g_state == LinkState::RUNNING && g_audio_ready &&
+                         g_voice_state == VoiceBridgeState::IDLE && !live_audio::pending() &&
+                         !should_suppress_rf_capture(now, sa818_is_rx());
+    live_audio::set_capture_allowed(allowed);
 }
 
-bool decode_and_play_frame(const uint8_t *frame, size_t frame_len) {
-    if (!frame || frame_len == 0) {
-        ++g_audio_rx_stats.audio_not_ready;
+bool queue_live_audio(const uint8_t *payload, size_t size) {
+    if (edit_controller_is_editing()) {
+        ++g_audio_rx_stats.editing_drop;
         return false;
     }
-
-    if (!mark_voice_packet_received()) {
-        return false;
-    }
-
-    if (!g_audio_ready || !g_opus_decoder) {
-        ++g_audio_rx_stats.audio_not_ready;
-        const uint32_t now = millis();
-        if ((now - g_last_audio_not_ready_log_at_ms) >= AUDIO_ERROR_LOG_INTERVAL_MS) {
-            g_last_audio_not_ready_log_at_ms = now;
-            Serial.printf("[NET][AUDIO] drop frame: audio_ready=%d i2c=%d codec=%d i2s=%d decoder=%d frame_len=%u\n",
-                          g_audio_ready ? 1 : 0,
-                          g_i2c_ready ? 1 : 0,
-                          g_codec_ready ? 1 : 0,
-                          g_i2s_ready ? 1 : 0,
-                          g_opus_decoder ? 1 : 0,
-                          static_cast<unsigned int>(frame_len));
-        }
-        return false;
-    }
-
-    const int decoded_samples = opus_decode(
-        g_opus_decoder,
-        frame,
-        static_cast<opus_int32>(frame_len),
-        g_rt_pcm_work,
-        OPUS_FRAME_SAMPLES_MAX,
-        0
-    );
-
-    if (decoded_samples <= 0) {
-        ++g_audio_rx_stats.decode_fail;
-        const uint32_t now = millis();
-        if ((now - g_last_decode_fail_log_at_ms) >= AUDIO_ERROR_LOG_INTERVAL_MS) {
-            g_last_decode_fail_log_at_ms = now;
-            Serial.printf("[NET][AUDIO] opus decode failed: ret=%d frame_len=%u\n",
-                          decoded_samples,
-                          static_cast<unsigned int>(frame_len));
-        }
-        return false;
-    }
-
-    // In-place mono->stereo expansion on the shared RT PCM workspace.
-    for (int i = decoded_samples - 1; i >= 0; --i) {
-        const int16_t sample = g_rt_pcm_work[i];
-        g_rt_pcm_work[i * 2] = sample;
-        g_rt_pcm_work[i * 2 + 1] = sample;
-    }
-
-    size_t written = 0;
-    const bool i2s_ok = i2s_write(
-        g_rt_pcm_work,
-        static_cast<size_t>(decoded_samples) * 2U * sizeof(int16_t),
-        &written
-    );
-    if (!i2s_ok || written == 0) {
-        ++g_audio_rx_stats.i2s_fail;
-        const uint32_t now = millis();
-        if ((now - g_last_i2s_fail_log_at_ms) >= AUDIO_ERROR_LOG_INTERVAL_MS) {
-            g_last_i2s_fail_log_at_ms = now;
-            Serial.printf("[NET][AUDIO] i2s write failed: ok=%d written=%u\n",
-                          i2s_ok ? 1 : 0,
-                          static_cast<unsigned int>(written));
-        }
-        return false;
-    }
-
-    ++g_audio_rx_stats.decoded_frames_ok;
+    if (!live_audio::enqueue(payload, size)) return false;
+    g_last_voice_packet_at_ms = millis();
+    live_audio::set_capture_allowed(false);
     return true;
-}
-
-void decode_and_play_payload(const uint8_t *payload, size_t payload_len) {
-    if (!payload || payload_len == 0) {
-        return;
-    }
-
-    // Length-prefixed merged frame mode (2-byte BE length + frame bytes).
-    if (payload_len >= 4 && payload[0] < 0x80) {
-        size_t cursor = 0;
-        bool parsed_ok = true;
-        bool decoded_any = false;
-        while (cursor + 2 <= payload_len) {
-            const uint16_t frame_len = static_cast<uint16_t>((payload[cursor] << 8) | payload[cursor + 1]);
-            cursor += 2;
-            if (frame_len == 0 || (cursor + frame_len) > payload_len) {
-                parsed_ok = false;
-                ++g_audio_rx_stats.merged_parse_fail;
-                break;
-            }
-            decoded_any = decode_and_play_frame(payload + cursor, frame_len) || decoded_any;
-            cursor += frame_len;
-        }
-        if (parsed_ok && cursor == payload_len && decoded_any) {
-            return;
-        }
-    }
-
-    // Single Opus frame mode.
-    decode_and_play_frame(payload, payload_len);
 }
 
 void on_auth_failed() {
@@ -2285,6 +2046,8 @@ void on_authenticated(const DraPacketHeader &header) {
                       g_i2s_ready ? 1 : 0,
                       g_opus_ready ? 1 : 0);
     }
+    refresh_tx_header();
+    live_audio::set_online(true);
     enter_state(LinkState::RUNNING, 0);
 }
 
@@ -2321,7 +2084,7 @@ void process_udp_packet(const uint8_t *packet, size_t packet_len) {
         ++g_audio_rx_stats.packets_type5;
         g_audio_rx_stats.audio_payload_bytes += static_cast<uint32_t>(data_len);
         edit_controller_set_network_bridge_source(header.call_sign, header.ssid);
-        decode_and_play_payload(data, data_len);
+        queue_live_audio(data, data_len);
         return;
     }
 
@@ -2330,7 +2093,7 @@ void process_udp_packet(const uint8_t *packet, size_t packet_len) {
         edit_controller_set_network_bridge_source(header.call_sign, header.ssid);
         if (data_len > 68) {
             g_audio_rx_stats.audio_payload_bytes += static_cast<uint32_t>(data_len - 68);
-            decode_and_play_payload(data + 68, data_len - 68);
+            queue_live_audio(data + 68, data_len - 68);
         } else {
             ++g_audio_rx_stats.server_voice_short;
         }
@@ -2355,24 +2118,22 @@ void poll_udp_packets() {
         return;
     }
 
-    // 每轮主循环最多处理这么多包。每个语音包都要 opus_decode + i2s_write，
-    // 原来的无界 while 在丢包重传或异常流量下会把主循环长时间钉死，
-    // 严重时触发看门狗。剩余的包留在 socket 里，下一轮继续取。
     for (uint8_t handled = 0; handled < UDP_MAX_PACKETS_PER_POLL; ++handled) {
+        xSemaphoreTake(g_udp_lock, portMAX_DELAY);
         const int packet_size = g_udp.parsePacket();
         if (packet_size <= 0) {
+            xSemaphoreGive(g_udp_lock);
             return;
         }
-
         const IPAddress remote_ip = g_udp.remoteIP();
         const uint16_t remote_port = g_udp.remotePort();
-
         if (packet_size > static_cast<int>(DRA_MAX_PACKET_SIZE)) {
             flush_large_udp_packet(packet_size);
+            xSemaphoreGive(g_udp_lock);
             continue;
         }
-
         const int read_len = g_udp.read(g_rt_packet_buffer, packet_size);
+        xSemaphoreGive(g_udp_lock);
         if (read_len > 0 && remote_ip == g_server_ip && remote_port == g_server_port) {
             process_udp_packet(g_rt_packet_buffer, static_cast<size_t>(read_len));
         }
@@ -2403,7 +2164,7 @@ void update_state_machine() {
 
     if (g_state == LinkState::RUNNING || g_state == LinkState::UDP_AUTH_WAIT) {
         poll_udp_packets();
-        maybe_capture_and_send_rf_audio();
+        service_audio_policy();
         maybe_log_audio_stats();
     }
 
@@ -2624,6 +2385,12 @@ bool init_audio_chain() {
 }
 } // namespace
 
+void net_audio_link_record_loop(uint32_t elapsed_us) {
+    g_loop_max_us = std::max(g_loop_max_us, elapsed_us);
+    if (elapsed_us > 50000) ++g_loop_over50;
+    if (elapsed_us > 100000) ++g_loop_over100;
+}
+
 bool net_audio_link_init() {
     if (g_initialized) {
         return g_audio_ready;
@@ -2637,7 +2404,11 @@ bool net_audio_link_init() {
     g_audio_codec_config = read_audio_codec_config_from_runtime();
     g_audio_codec_config_initialized = true;
 
+    g_udp_lock = xSemaphoreCreateMutex();
+    if (!g_udp_lock) return false;
     g_audio_ready = init_audio_chain();
+    if (g_audio_ready)
+        g_audio_ready = live_audio::init(g_opus_encoder, g_opus_decoder, send_live_audio);
     g_initialized = true;
     enter_state(LinkState::WAIT_WIFI, 300);
     return g_audio_ready;
@@ -2658,6 +2429,7 @@ void net_audio_link_update() {
     }
     update_audio_codec_runtime_config();
     update_state_machine();
+    if (g_state == LinkState::RUNNING) refresh_tx_header();
 }
 
 void net_audio_link_reload_server_config() {

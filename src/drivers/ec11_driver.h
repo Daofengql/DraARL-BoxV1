@@ -32,6 +32,8 @@ EC11Direction ec11_get_direction(void);
 void ec11_set_acceleration(bool enable);
 void ec11_set_debounce(uint32_t debounce_ms);
 void ec11_set_long_press_threshold(uint32_t threshold_ms);
+// Drop partial turns and require held buttons to be released after input gating.
+void ec11_discard_pending_input();
 void ec11_update(void);
 
 #endif // EC11_DRIVER_H

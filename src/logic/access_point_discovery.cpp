@@ -198,16 +198,11 @@ bool is_usable(const Endpoint &endpoint) {
     return endpoint.host[0] != '\0' && endpoint.port != 0;
 }
 
-bool fetch_candidates(const char *api_base_url,
-                      const char *username,
-                      const char *device_password,
-                      Endpoint *out,
-                      size_t out_capacity,
-                      size_t &out_count) {
-    out_count = 0;
-    if (!out || out_capacity == 0) {
-        return false;
-    }
+bool fetch_endpoint(const char *api_base_url,
+                    const char *username,
+                    const char *device_password,
+                    Endpoint &out) {
+    reset(out);
     if (WiFi.status() != WL_CONNECTED) {
         return false;
     }
@@ -241,40 +236,24 @@ bool fetch_candidates(const char *api_base_url,
         return false;
     }
 
+    // Current servers return one local endpoint. Keep data.items wire compatibility.
     for (JsonVariantConst item : items) {
-        if (out_count >= out_capacity) {
-            break;
-        }
         const char *host = item["udp_host"] | "";
         const int port = item["udp_port"] | 0;
-        if (host[0] == '\0' || port <= 0 || port > 65535) {
-            continue;
-        }
-
-        Endpoint &endpoint = out[out_count];
-        reset(endpoint);
+        if (host[0] == '\0' || strlen(host) > HOST_MAX_LEN || port <= 0 || port > 65535) continue;
         const JsonVariantConst id = item["id"];
         if (id.is<const char *>()) {
-            copy_cstr(endpoint.id, id.as<const char *>());
-        } else if (id.is<uint64_t>()) {
-            snprintf(endpoint.id,
-                     sizeof(endpoint.id),
-                     "%llu",
-                     static_cast<unsigned long long>(id.as<uint64_t>()));
+            const char *id_text = id.as<const char *>();
+            if (strlen(id_text) > ID_MAX_LEN) continue;
+            copy_cstr(out.id, id_text);
         } else if (id.is<int64_t>()) {
-            snprintf(endpoint.id,
-                     sizeof(endpoint.id),
-                     "%lld",
-                     static_cast<long long>(id.as<int64_t>()));
+            snprintf(out.id, sizeof(out.id), "%lld", static_cast<long long>(id.as<int64_t>()));
         }
-        copy_cstr(endpoint.host, host);
-        endpoint.port = static_cast<uint16_t>(port);
-        endpoint.priority = item["priority"] | 0;
-        ++out_count;
+        copy_cstr(out.host, host);
+        out.port = static_cast<uint16_t>(port);
+        return true;
     }
-
-    Serial.printf("[AP] discovered %u access point(s)\n", static_cast<unsigned int>(out_count));
-    return out_count > 0;
+    return false;
 }
 
 bool probe_start(const IPAddress &target) {
@@ -348,58 +327,5 @@ void probe_abort() {
     g_probe.finished = false;
 }
 
-bool select_best(const Endpoint *candidates, size_t count, Endpoint &out) {
-    if (!candidates || count == 0) {
-        return false;
-    }
-
-    const Endpoint *best = nullptr;
-    for (size_t i = 0; i < count; ++i) {
-        const Endpoint &candidate = candidates[i];
-        if (!is_usable(candidate)) {
-            continue;
-        }
-        if (!best) {
-            best = &candidate;
-            continue;
-        }
-
-        const bool candidate_reachable = candidate.rtt_ms != RTT_UNKNOWN;
-        const bool best_reachable = best->rtt_ms != RTT_UNKNOWN;
-        if (candidate_reachable != best_reachable) {
-            if (candidate_reachable) {
-                best = &candidate;
-            }
-            continue;
-        }
-
-        if (!candidate_reachable) {
-            // 两者都探测不通（ICMP 可能被拦截），沿用服务端排序。
-            if (candidate.priority < best->priority) {
-                best = &candidate;
-            }
-            continue;
-        }
-
-        const uint16_t gap = (candidate.rtt_ms > best->rtt_ms)
-                                 ? static_cast<uint16_t>(candidate.rtt_ms - best->rtt_ms)
-                                 : static_cast<uint16_t>(best->rtt_ms - candidate.rtt_ms);
-        if (gap < RTT_TIE_MS) {
-            if (candidate.priority < best->priority) {
-                best = &candidate;
-            }
-            continue;
-        }
-        if (candidate.rtt_ms < best->rtt_ms) {
-            best = &candidate;
-        }
-    }
-
-    if (!best) {
-        return false;
-    }
-    out = *best;
-    return true;
-}
 
 } // namespace access_point

@@ -22,6 +22,7 @@
 #include "connectivity_manager.h"
 #include "device_config.h"
 #include "edit_controller.h"
+#include "../drivers/button_input.h"
 #include "http_request_gate.h"
 #include "net_audio_link.h"
 #include "ota_update.h"
@@ -54,9 +55,7 @@ enum class LocalInputGateState {
 AppState app_state = AppState::POWER_WAIT;
 LocalInputGateState local_input_gate_state = LocalInputGateState::READY;
 
-bool key_last_pressed = false;
-bool key_long_triggered = false;
-uint32_t key_pressed_at_ms = 0;
+button_input::Button power_key;
 bool auto_start_enabled = false;
 
 size_t startup_step_index = 0;
@@ -228,9 +227,8 @@ void consume_ota_check_result(uint32_t now_ms) {
 }
 
 void reset_local_input_state() {
-    key_last_pressed = false;
-    key_long_triggered = false;
-    key_pressed_at_ms = 0;
+    power_key.reset(digitalRead(KEY0_PIN) == LOW, millis(), true);
+    ec11_discard_pending_input();
 }
 
 bool should_poll_local_inputs(uint32_t now_ms) {
@@ -255,6 +253,7 @@ bool should_poll_local_inputs(uint32_t now_ms) {
                 static_cast<int32_t>(now_ms - local_input_resume_at_ms) >= 0) {
                 local_input_gate_state = LocalInputGateState::READY;
                 local_input_resume_at_ms = 0;
+                reset_local_input_state();
                 return true;
             }
             return false;
@@ -485,11 +484,7 @@ void start_boot_sequence(uint32_t now_ms) {
 }
 
 void on_encoder_event(EC11Event event, int32_t value) {
-    if (connectivity_manager_handle_encoder_event(event, value)) {
-        return;
-    }
-
-    edit_controller_on_encoder_event(event, value);
+    if (app_state == AppState::MAIN_READY) edit_controller_on_encoder_event(event, value);
 }
 
 void update_startup_sequence(uint32_t now_ms) {
@@ -580,41 +575,19 @@ void update_startup_sequence(uint32_t now_ms) {
 }
 
 void update_power_key(uint32_t now_ms) {
-    const bool pressed = (digitalRead(KEY0_PIN) == LOW);
-
-    if (pressed && !key_last_pressed) {
-        key_pressed_at_ms = now_ms;
-        key_long_triggered = false;
+    const auto events = power_key.update(digitalRead(KEY0_PIN) == LOW, now_ms, KEY_LONG_PRESS_MS);
+    if (events.long_press) {
+        if (app_state == AppState::POWER_WAIT) start_boot_sequence(now_ms);
+        else if (app_state == AppState::MAIN_READY) edit_controller_on_key0_long_press();
+    } else if (events.click && app_state == AppState::MAIN_READY) {
+        edit_controller_on_key0_short_press();
     }
-
-    if (!pressed && key_last_pressed) {
-        const uint32_t press_duration_ms = now_ms - key_pressed_at_ms;
-        if (app_state == AppState::MAIN_READY && press_duration_ms < KEY_LONG_PRESS_MS) {
-            edit_controller_on_key0_short_press();
-        }
-        key_long_triggered = false;
-    }
-
-    if (app_state == AppState::POWER_WAIT && pressed && !key_long_triggered) {
-        if ((now_ms - key_pressed_at_ms) >= KEY_LONG_PRESS_MS) {
-            key_long_triggered = true;
-            start_boot_sequence(now_ms);
-        }
-    }
-
-    if (app_state == AppState::MAIN_READY && pressed && !key_long_triggered) {
-        if ((now_ms - key_pressed_at_ms) >= KEY_LONG_PRESS_MS) {
-            key_long_triggered = true;
-            edit_controller_on_key0_long_press();
-        }
-    }
-
-    key_last_pressed = pressed;
 }
 } // namespace
 
 void app_logic_init() {
     pinMode(KEY0_PIN, INPUT_PULLUP);
+    power_key.reset(digitalRead(KEY0_PIN) == LOW, millis());
     ensure_local_timezone();
     http_request_gate::init();
 
@@ -622,7 +595,7 @@ void app_logic_init() {
         Serial.println("EC11 init failed.");
     }
     ec11_set_acceleration(false);
-    ec11_set_long_press_threshold(900);
+    ec11_set_long_press_threshold(KEY_LONG_PRESS_MS);
     ec11_set_callback(on_encoder_event);
 
     edit_controller_init();

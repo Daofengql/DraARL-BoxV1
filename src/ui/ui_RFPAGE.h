@@ -18,18 +18,15 @@ extern lv_obj_t * ui_PWP;
 extern lv_obj_t * ui_PWL;
 extern lv_obj_t * ui_PWS;
 extern lv_obj_t * ui_PWN;
-extern lv_obj_t * ui_LimitP;
-extern lv_obj_t * ui_PWL1;
-extern lv_obj_t * ui_rfguard;
-extern lv_obj_t * ui_rfguardsingle;
-extern lv_obj_t * ui_rfguardwindow;
-extern lv_obj_t * ui_rfguardmaxtxinwindow;
 extern lv_obj_t * ui_header2;
 extern lv_obj_t * ui_logo2;
 extern lv_obj_t * ui_title1;
 extern lv_obj_t * ui_wifistat1;
 extern lv_obj_t * ui_bluestat1;
 extern lv_obj_t * ui_hasNewUpdate1;
+extern lv_obj_t *ui_rfModule;
+extern lv_obj_t *ui_rfTx;
+extern lv_obj_t *ui_rfRx;
 // CUSTOM VARIABLES
 
 #ifdef __cplusplus

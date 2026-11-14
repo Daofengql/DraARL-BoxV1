@@ -6,7 +6,7 @@
 
 固件重点覆盖四件事：
 
-1. 本地射频终端控制：频率、亚音、静噪、带宽、功率、RF Guard。
+1. 本地射频终端控制：频率、亚音、静噪、带宽、功率。
 2. 本地 UI 与离线部署入口：LVGL 页面、旋钮/按键交互、BLE GATT 配置。
 3. 网络语音链路：DraARL UDP 鉴权、心跳、Opus 16 kHz 语音收发、网络到 RF 桥接。
 4. 设备运维：NVS 参数持久化、服务器配置同步、时间同步、OTA 检查与升级。
@@ -29,13 +29,12 @@
 - EC11 旋钮负责页面导航、数值调整、确认和编辑状态切换。
 - SA818 UHF 模块初始化与运行时参数下发。
 - 支持 TX/RX 频率、TX/RX 亚音、静噪、宽/窄带、功率高低切换。
-- 支持 RF Guard：单次发射时长限制、滑动窗口占空保护和网络语音过载保护。
 - ES8388 + I2S 音频链路，Opus 16 kHz 单声道编码/解码。
 - DraARL UDP 链路：HTTP 预检查、动态码绑定、UDP 鉴权、心跳、配置同步、语音收发。
 - 服务端时间同步，界面按中国标准时间 `UTC+8` 显示。
 - Wi-Fi STA 连接，支持 DHCP 或静态 IP。
 - BLE GATT 配置入口，带 6 位动态认证码。
-- 仓库附带 Web Bluetooth 配置页：[`web/ble-config.html`](web/ble-config.html)。
+- 蓝牙配置使用 DraARL-Server 前端的预配置工具或 DraARL Android；固件仓库内弃用的独立 HTML 已删除。
 - OTA 检查与升级：定时检查、待更新状态缓存、MD5/SHA256 校验、更新按钮触发安装。
 - PlatformIO 构建，并提供固件打包脚本：[`tools/package_firmware.py`](tools/package_firmware.py)。
 
@@ -98,11 +97,10 @@
 |   |-- config.h            # 固件版本、设备型号、引脚定义
 |   |-- drivers             # 显示、EC11、I2C、I2S、ES8388、SA818、UART 驱动
 |   |-- logic               # 应用状态机、配置、联网、语音链路、OTA
-|   `-- ui                  # SquareLine Studio 导出的 LVGL 代码和资源
-|-- lvglProj                # SquareLine Studio 工程
-|-- web
-|   `-- ble-config.html     # 浏览器端 BLE 配置工具
+|   `-- ui                  # 手工维护的 LVGL 页面和资源
+|-- lvglProj                # 历史 SquareLine 工程，仅作参考
 `-- tools
+    |-- ui_preview          # 实际 LVGL / 控制器本地渲染与输入回归
     `-- package_firmware.py # 固件产物打包脚本
 ```
 
@@ -112,7 +110,7 @@
 
 1. 背光保持关闭，初始化串口并输出固件版本、内存信息。
 2. 初始化 PWM 背光、显示驱动和 LVGL。
-3. 分配 LVGL 双缓冲并加载 SquareLine UI。
+3. 分配 LVGL 双缓冲并加载 LVGL UI。
 4. 注册设置页 OTA 更新按钮事件。
 5. 初始化应用逻辑，进入等待开机状态。
 6. KEY0 长按 1 秒或启用自启动后进入启动页。
@@ -126,7 +124,7 @@
 | [`src/logic/app_logic.cpp`](src/logic/app_logic.cpp) | 开机状态机、启动页进度、KEY0、时钟刷新、OTA 定时检查、输入门控 |
 | [`src/logic/edit_controller.cpp`](src/logic/edit_controller.cpp) | 主界面/设置页/RF 页/信息页交互，射频参数编辑和持久化 |
 | [`src/logic/connectivity_manager.cpp`](src/logic/connectivity_manager.cpp) | Wi-Fi 状态机、BLE GATT、动态码认证、BLE RPC 配置 |
-| [`src/logic/net_audio_link.cpp`](src/logic/net_audio_link.cpp) | DraARL HTTP/UDP 状态机、绑定、鉴权、心跳、配置同步、语音桥接、RF Guard |
+| [`src/logic/net_audio_link.cpp`](src/logic/net_audio_link.cpp) | DraARL HTTP/UDP 状态机、绑定、鉴权、心跳、配置同步、语音桥接 |
 | [`src/logic/access_point_discovery.cpp`](src/logic/access_point_discovery.cpp) | 入口发现：拉取服务端 UDP 接入点列表并通过 ICMP 测速择优 |
 | [`src/logic/device_config.cpp`](src/logic/device_config.cpp) | Wi-Fi、Radio、Server、OTA、本地 UI 配置的默认值、校验和 NVS 读写 |
 | [`src/logic/ota_update.cpp`](src/logic/ota_update.cpp) | 固件版本检查、下载、哈希校验、写入 OTA 分区 |
@@ -139,17 +137,34 @@
 - `StartUP`：启动日志与进度条。
 - `main`：时间、Wi-Fi/BLE/服务器/同步状态、频率和射频状态。
 - `SettingPAGE`：亮度、BLE、自启动、更新、高级 RF、关于。
-- `RFPAGE`：功率与 RF Guard 参数。
+- `RFPAGE`：功率、模块状态与收发频率摘要。
 - `InfoPage`：设备与运行状态信息。
 
-输入规则：
+输入规则统一为「旋转选择、按下进入或确认、KEY0 返回或取消」。青色代表选择，橙色代表修改；屏幕底部显示当前可用操作。
 
-- `KEY0` 长按：等待开机时启动设备；主界面中打开电源菜单。
-- `KEY0` 短按：主界面中切换/退出当前编辑或页面状态。
-- `EC11 旋转`：移动焦点、选择频率位、调整数值。
-- `EC11 按压`：确认、进入页面、切换编辑状态。
+| 场景 | 旋转 | 按下旋钮 | KEY0 短按 |
+| --- | --- | --- | --- |
+| 射频主页 | 选择 TX/RX 频率、亚音、静噪、带宽或设置 | 选中字段后进入编辑 | 退出选择回到待机 |
+| 频率选位 | 从左向右选择数字及末尾 Save | 数字进入调值，Save 保存当前字段 | 撤销本次字段修改 |
+| 频率调值 | 调整当前位 | 回到选位 | 撤销本次字段修改 |
+| 亚音／静噪／带宽 | 调整数值 | 保存当前字段 | 撤销本次字段修改 |
+| 设置 | 切换项目，跳过不可用的更新／射频项 | 编辑亮度、切换开关或打开页面 | 返回主页；亮度编辑中先撤销 |
+| 亮度 | 实时预览 | 确认并写入一次 NVS | 恢复原亮度 |
+| 射频页 | — | 直接切换高低功率 | 返回设置并保留焦点 |
+| 关于 | 上下滚动完整信息 | 返回设置 | 返回设置 |
+| 电源菜单 | 选择取消／锁屏／关机 | 确认 | 取消菜单 |
+| BLE／绑定提示 | — | 关闭提示 | 关闭提示 |
 
-发射或网络到 RF 桥接期间，应用会暂停本地输入轮询，避免 PTT 活动时误触发 UI 操作。
+- 运行时任意页面长按 `KEY0` 1 秒打开电源菜单；等待开机时长按开机。未确认的字段／亮度修改会先撤销。
+- 待机或字段选择时长按旋钮可直接打开设置；字段编辑时长按旋钮可保存当前字段。频率的末尾 Save 提供无需长按的保存方式。
+- 网络模式按下或旋转旋钮直接打开设置。关于页的长地址换行显示并可滚动。
+- 锁屏后按下旋钮或 KEY0 只负责唤醒，当前手势不会继续操作底层页面。
+- 两个按键共用 25 ms 消抖，长按到阈值时触发一次，松开不会再触发短按。
+- 仅浏览字段不会阻止网络来话；开始发射时退出字段浏览并显示实际发射状态。未确认的编辑草稿不会被配置查询／上报发送，服务端或 BLE 新配置会替换本地草稿。
+- 发射或网络到 RF 桥接期间暂停本地输入，PTT 释放后的 500 ms 恢复等待结束时清空残留输入；按住的键需要先释放再重新按下。
+- 字段保存失败保留草稿并提示重试，可用 KEY0 撤销。频率／亚音／静噪／带宽仅在确认时应用并保存，不需要依次走完整个参数列表。
+
+本地详细预览与回归入口见 [`tools/ui_preview/README.md`](tools/ui_preview/README.md)。
 
 ## 射频功能
 
@@ -169,17 +184,13 @@
 | 静噪 | `4` |
 | 带宽 | 窄带 |
 | 功率 | 高 |
-| RF Guard | 开启 |
-| 单次 TX 限制 | `30 s` |
-| 统计窗口 | `300 s` |
-| 窗口内最大 TX | `60 s` |
 
 RF 功率通过 `SA818_PW` 控制：
 
 - 高功率：`PW` 高阻态。
 - 低功率：`PW` 拉低。
 
-射频参数变更后会立即应用到运行时状态，写入 NVS，并在网络链路可用时安排配置同步。
+射频参数编辑采用草稿，确认后应用到模块、写入 NVS，并安排网络配置同步；取消恢复原值。功率开关按下即确认。原发射保护参数不再读取，旧 NVS 键忽略。
 
 ## 配置与 NVS
 
@@ -204,10 +215,6 @@ RF 功率通过 `SA818_PW` 控制：
 | Radio | `radio_sql` | 静噪等级 |
 | Radio | `radio_bw` | 宽带开关 |
 | Radio | `radio_pwr` | 高功率开关 |
-| Radio | `radio_rfg_en` | RF Guard 开关 |
-| Radio | `radio_rfg_stx` | RF Guard 单次 TX 秒数 |
-| Radio | `radio_rfg_win` | RF Guard 统计窗口秒数 |
-| Radio | `radio_rfg_max` | RF Guard 窗口内最大 TX 秒数 |
 | Server | `svr_call` | 呼号 |
 | Server | `svr_ssid` | 节点 SSID |
 | Server | `svr_dmr` | DMR ID |
@@ -248,8 +255,7 @@ WAIT_WIFI -> PRECHECK -> REQUEST_CODE / CONFIRM_BIND -> DISCOVER_FETCH -> DISCOV
 
 - 若本地没有账号或设备准入密码，会请求动态绑定码并在屏幕上显示。
 - 通过 HTTP 接口完成预检查、请求绑定码、确认绑定。
-- 每次开机做一次入口发现：拉取服务端入口列表，逐个 ICMP 测速后选定最优节点；
-  选定后本次运行不再重测或切换，重启才会重新择优。
+- 使用 HTTP API 下发的本站唯一 UDP 入口；ICMP 仅用于延迟显示。心跳失败后重新发现入口，兼容节点 IP／端口变化。
 - DNS 解析服务器地址后建立 UDP 会话。
 - 使用 DraARL 包头发送心跳完成 UDP 鉴权。
 - 运行态定时发送心跳，并接收配置、时间和语音包。
@@ -270,7 +276,7 @@ WAIT_WIFI -> PRECHECK -> REQUEST_CODE / CONFIRM_BIND -> DISCOVER_FETCH -> DISCOV
 - `CONFIG_CMD_APPLY`
 - `CONFIG_CMD_TIME`
 
-支持同步的配置项包括 RX/TX 频率、CTCSS、亚音模式和值、静噪、功率、带宽、RF Guard 参数和时间戳。
+支持同步的配置项包括 RX/TX 频率、CTCSS、亚音模式和值、静噪、功率、带宽和时间戳。
 
 ## 音频链路
 
@@ -329,7 +335,7 @@ RPC 命令：
 
 除 `get_status` 外，RPC 需要先写入屏幕显示的 6 位动态码完成认证。
 
-Web Bluetooth 配置页位于 [`web/ble-config.html`](web/ble-config.html)。建议使用 Chromium 内核浏览器，并在 `https` 或 `localhost` 安全上下文中打开。
+使用 DraARL-Server 前端预配置工具；浏览器需支持 Web Bluetooth，并使用 `https` 或 `localhost` 安全上下文。也可使用 DraARL Android 的蓝牙设置。固件仓库不再维护独立配置 HTML。
 
 ## OTA
 
@@ -427,8 +433,8 @@ python tools/package_firmware.py --env esp32s3-n16r8 --version 0.0.13
 2. 上电后长按 `KEY0` 进入启动流程，或提前在 NVS 中启用自启动。
 3. 等待主界面加载。
 4. 若没有 Wi-Fi 配置或连续连接失败，设备会自动开启 BLE 配置弹窗；已有配置时仍会在后台低频重试，以兼容路由器启动较慢的场景，连接成功后自动关闭 BLE。
-5. 用支持 Web Bluetooth 的浏览器打开 [`web/ble-config.html`](web/ble-config.html)。
-6. 连接 `DraARL-XXXXXX` 设备并输入屏幕上的 6 位动态码。
+5. 打开 DraARL-Server 前端的预配置工具，或进入 DraARL Android 蓝牙设置。
+6. 连接 `DraARL-XXXXXX` 设备并输入屏幕上的 6 位蓝牙认证码（与服务器绑定码不同）。
 7. 写入 Wi-Fi、射频和服务器配置。
 8. 等待 Wi-Fi 连接、HTTP 预检查、绑定或 UDP 鉴权完成。
 9. 观察主界面的 Wi-Fi、BLE、服务器和配置同步图标。
@@ -478,7 +484,7 @@ python tools/package_firmware.py --env esp32s3-n16r8 --version 0.0.13
 
 ## 开发注意
 
-- `src/ui` 是 SquareLine Studio 导出的代码，重新导出后需要检查对象名是否变化。
+- `src/ui` 页面由手工维护，不要用历史 `lvglProj` 导出覆盖。修改后运行本地 LVGL 渲染、输入回归和 PlatformIO 构建。
 - 逻辑层依赖多个固定 UI 对象名，例如 `ui_time`、`ui_serverstat`、`ui_configsync`、`ui_updateBT`。
 - 网络、BLE 和 Wi-Fi 回调不会直接操作 LVGL，而是设置事件标志后由主循环消费。
 - 配置变更路径需要同时考虑运行时状态、NVS、UI 刷新和云端同步。

@@ -40,6 +40,7 @@ extern lv_obj_t * ui_title2;
 extern lv_obj_t * ui_wifistat2;
 extern lv_obj_t * ui_bluestat2;
 extern lv_obj_t * ui_hasNewUpdate2;
+extern lv_obj_t *ui_settingsHint;
 // CUSTOM VARIABLES
 
 #ifdef __cplusplus

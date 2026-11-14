@@ -18,7 +18,6 @@ void edit_controller_get_radio_config(device_config::RadioConfig &config);
 bool edit_controller_set_radio_config(const device_config::RadioConfig &config, bool persist);
 void edit_controller_set_network_bridge_active(bool active);
 void edit_controller_set_network_bridge_source(const char *call_sign, uint8_t ssid);
-void edit_controller_set_rf_overload_active(bool active);
 void edit_controller_hide_power_popup();
 bool edit_controller_is_power_popup_visible();
 bool edit_controller_is_editing();

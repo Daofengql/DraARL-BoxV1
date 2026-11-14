@@ -12,6 +12,7 @@
 #include <cstdio>
 #include <cstring>
 #include <functional>
+#include <mutex>
 #include <string>
 
 #include "../ui/ui.h"
@@ -91,6 +92,9 @@ uint32_t g_ble_idle_since_ms = 0;
 char g_ble_auth_code[BLE_AUTH_CODE_LEN + 1] = {0};
 char g_ble_device_name[32] = {0};
 String g_ble_rpc_rx_buffer;
+String g_ble_rpc_pending;
+std::mutex g_ble_rpc_mutex;
+bool g_ble_rpc_started = false;
 
 BLEServer *g_ble_server = nullptr;
 BLEService *g_ble_service = nullptr;
@@ -510,38 +514,50 @@ class RpcTxCharacteristicCallbacks final : public BLECharacteristicCallbacks {
 public:
     void onWrite(BLECharacteristic *characteristic) override {
         if (!characteristic) return;
-
-        // Keep transport state in sync to avoid dropping RPC responses.
-        g_ble_transport_connected = true;
-
         const std::string value = characteristic->getValue();
         if (value.empty()) return;
-
-        const uint8_t *raw = reinterpret_cast<const uint8_t *>(value.data());
-        const size_t len = value.length();
-        const uint8_t flags = raw[0];
-
+        std::lock_guard<std::mutex> lock(g_ble_rpc_mutex);
+        if (g_evt_rpc_ready) return; // Never overwrite an unconsumed complete request.
+        const uint8_t flags = static_cast<uint8_t>(value[0]);
+        if (value.size() > BLE_RPC_CHUNK_PAYLOAD + 1 || (flags & ~0x03) != 0) {
+            g_ble_rpc_rx_buffer = "";
+            g_ble_rpc_started = false;
+            return;
+        }
         if (flags & BLE_CHUNK_FLAG_START) {
             g_ble_rpc_rx_buffer = "";
+            g_ble_rpc_started = true;
         }
-
-        if (len > 1) {
-            g_ble_rpc_rx_buffer.reserve(g_ble_rpc_rx_buffer.length() + len - 1);
-            for (size_t i = 1; i < len; ++i) {
-                g_ble_rpc_rx_buffer += static_cast<char>(raw[i]);
-            }
+        if (!g_ble_rpc_started) return;
+        if (g_ble_rpc_rx_buffer.length() + value.size() - 1 > 4096) {
+            g_ble_rpc_rx_buffer = "";
+            g_ble_rpc_started = false;
+            return;
         }
-
+        for (size_t i = 1; i < value.size(); ++i) g_ble_rpc_rx_buffer += value[i];
         if (flags & BLE_CHUNK_FLAG_END) {
-            g_evt_rpc_ready = true; // 组包完毕，唤醒主线程解析
+            g_ble_rpc_pending = g_ble_rpc_rx_buffer;
+            g_ble_rpc_rx_buffer = "";
+            g_ble_rpc_started = false;
+            g_evt_rpc_ready = true;
         }
     }
 };
+
+void reset_ble_rpc() {
+    std::lock_guard<std::mutex> lock(g_ble_rpc_mutex);
+    g_ble_rpc_rx_buffer = "";
+    g_ble_rpc_pending = "";
+    g_ble_rpc_started = false;
+    g_evt_rpc_ready = false;
+}
 
 // -----------------------------------------------------
 // 以下为业务处理函数，在主线程环境下运行是完全安全的
 // -----------------------------------------------------
 void add_config_to_response(JsonObject root) {
+    const bool has_radio = edit_controller_get_device_model() == 1;
+    root["dev_model"] = has_radio ? 1 : 2;
     JsonObject wifi = root["wifi"].to<JsonObject>();
     wifi["ssid"] = g_config.wifi.ssid;
     wifi["password"] = g_config.wifi.password;
@@ -561,6 +577,7 @@ void add_config_to_response(JsonObject root) {
     format_frequency_mhz(radio_config.rx_frequency_x10000, rx_freq, sizeof(rx_freq));
 
     JsonObject radio = root["radio"].to<JsonObject>();
+    if (has_radio) {
     radio["tx_frequency_mhz"] = tx_freq;
     radio["rx_frequency_mhz"] = rx_freq;
     radio["tx_tone_type"] = subaudio_type_to_string(radio_config.tx_subaudio.type);
@@ -571,15 +588,14 @@ void add_config_to_response(JsonObject root) {
     radio["wide_band"] = radio_config.wide_band;
     radio["power_high"] = radio_config.power_high;
     radio["power_level"] = radio_config.power_high ? 3 : 1;
-    radio["rf_guard_enabled"] = radio_config.rf_guard_enabled;
-    radio["rf_guard_single_tx_limit_s"] = radio_config.rf_guard_single_tx_limit_s;
-    radio["rf_guard_window_s"] = radio_config.rf_guard_window_s;
-    radio["rf_guard_max_tx_in_window_s"] = radio_config.rf_guard_max_tx_in_window_s;
+    }
     radio["adc_gain_db"] = radio_config.adc_gain_db;
     radio["adc_volume"] = radio_config.adc_volume;
     radio["dac_volume"] = radio_config.dac_volume;
-    radio["sql_active_high"] = radio_config.sql_active_high;
-    radio["ptt_active_high"] = radio_config.ptt_active_high;
+    if (!has_radio) {
+        radio["sql_active_high"] = radio_config.sql_active_high;
+        radio["ptt_active_high"] = radio_config.ptt_active_high;
+    }
 
     JsonObject server = root["server"].to<JsonObject>();
     server["callsign"] = g_config.server.callsign;
@@ -589,7 +605,7 @@ void add_config_to_response(JsonObject root) {
     server["account"] = g_config.server.account;
     server["device_auth_password"] = g_config.server.device_auth_password;
 
-    // 只读：UDP 入口由 HTTP 发现接口下发并经本地 ICMP 择优，不接受写入。
+    // 只读：UDP 入口由本站 HTTP API 下发，不接受写入。
     access_point::Endpoint endpoint = {};
     JsonObject active = server["access_point"].to<JsonObject>();
     if (net_audio_link_get_access_point(endpoint)) {
@@ -630,30 +646,26 @@ bool parse_wifi_config(JsonObjectConst input, device_config::WiFiConfig &config,
 }
 
 bool parse_radio_config(JsonObjectConst input, device_config::RadioConfig &config, String &error) {
-    device_config::set_defaults(config);
-    if (!parse_frequency_value(input["tx_frequency_mhz"], config.tx_frequency_x10000) ||
-        !parse_frequency_value(input["rx_frequency_mhz"], config.rx_frequency_x10000)) {
-        error = "Radio frequency invalid";
-        return false;
+    // BLE writes can update audio only; preserve untouched RF settings.
+    edit_controller_get_radio_config(config);
+    const bool has_radio = edit_controller_get_device_model() == 1;
+    if (has_radio) {
+        if ((!input["tx_frequency_mhz"].isNull() && !parse_frequency_value(input["tx_frequency_mhz"], config.tx_frequency_x10000)) ||
+            (!input["rx_frequency_mhz"].isNull() && !parse_frequency_value(input["rx_frequency_mhz"], config.rx_frequency_x10000))) {
+            error = "Radio frequency invalid";
+            return false;
+        }
+        if (!input["tx_tone_type"].isNull()) config.tx_subaudio.type = subaudio_type_from_string(String(input["tx_tone_type"] | "OFF"));
+        config.tx_subaudio.index = input["tx_tone_index"] | config.tx_subaudio.index;
+        if (!input["rx_tone_type"].isNull()) config.rx_subaudio.type = subaudio_type_from_string(String(input["rx_tone_type"] | "OFF"));
+        config.rx_subaudio.index = input["rx_tone_index"] | config.rx_subaudio.index;
+        int sql = input["squelch"] | static_cast<int>(config.squelch);
+        if (sql < 0 || sql > 8) { error = "Squelch must be 0-8"; return false; }
+        config.squelch = static_cast<uint8_t>(sql);
+        config.wide_band = input["wide_band"] | config.wide_band;
+        if (!input["power_high"].isNull()) config.power_high = input["power_high"] | config.power_high;
+        else if (!input["power_level"].isNull()) config.power_high = (input["power_level"] | 1) >= 2;
     }
-    config.tx_subaudio.type = subaudio_type_from_string(String(input["tx_tone_type"] | "OFF"));
-    config.tx_subaudio.index = input["tx_tone_index"] | 0;
-    config.rx_subaudio.type = subaudio_type_from_string(String(input["rx_tone_type"] | "OFF"));
-    config.rx_subaudio.index = input["rx_tone_index"] | 0;
-    config.squelch = input["squelch"] | 4;
-    config.wide_band = input["wide_band"] | false;
-    if (!input["power_high"].isNull()) {
-        config.power_high = input["power_high"] | false;
-    } else {
-        const uint8_t power_level = input["power_level"] | (config.power_high ? 3 : 1);
-        config.power_high = power_level >= 2;
-    }
-    config.rf_guard_enabled = input["rf_guard_enabled"] | config.rf_guard_enabled;
-    config.rf_guard_single_tx_limit_s =
-        input["rf_guard_single_tx_limit_s"] | config.rf_guard_single_tx_limit_s;
-    config.rf_guard_window_s = input["rf_guard_window_s"] | config.rf_guard_window_s;
-    config.rf_guard_max_tx_in_window_s =
-        input["rf_guard_max_tx_in_window_s"] | config.rf_guard_max_tx_in_window_s;
 
     const int adc_gain_db = input["adc_gain_db"] | static_cast<int>(config.adc_gain_db);
     const int adc_volume = input["adc_volume"] | static_cast<int>(config.adc_volume);
@@ -670,8 +682,10 @@ bool parse_radio_config(JsonObjectConst input, device_config::RadioConfig &confi
     config.adc_gain_db = device_config::normalize_adc_gain_db(static_cast<uint8_t>(adc_gain_db));
     config.adc_volume = static_cast<uint8_t>(adc_volume);
     config.dac_volume = static_cast<uint8_t>(dac_volume);
-    config.sql_active_high = input["sql_active_high"] | config.sql_active_high;
-    config.ptt_active_high = input["ptt_active_high"] | config.ptt_active_high;
+    if (!has_radio) {
+        config.sql_active_high = input["sql_active_high"] | config.sql_active_high;
+        config.ptt_active_high = input["ptt_active_high"] | config.ptt_active_high;
+    }
 
     if (config.tx_frequency_x10000 < 4000000UL || config.tx_frequency_x10000 > 4700000UL ||
         config.rx_frequency_x10000 < 4000000UL || config.rx_frequency_x10000 > 4700000UL) {
@@ -682,21 +696,7 @@ bool parse_radio_config(JsonObjectConst input, device_config::RadioConfig &confi
         error = "Squelch must be 0-8";
         return false;
     }
-    if (config.rf_guard_single_tx_limit_s < device_config::RF_GUARD_SINGLE_TX_LIMIT_MIN_S ||
-        config.rf_guard_single_tx_limit_s > device_config::RF_GUARD_SINGLE_TX_LIMIT_MAX_S) {
-        error = "RF guard single_tx_limit_s invalid";
-        return false;
-    }
-    if (config.rf_guard_window_s < device_config::RF_GUARD_WINDOW_MIN_S ||
-        config.rf_guard_window_s > device_config::RF_GUARD_WINDOW_MAX_S) {
-        error = "RF guard window_s invalid";
-        return false;
-    }
-    if (config.rf_guard_max_tx_in_window_s < device_config::RF_GUARD_MAX_TX_IN_WINDOW_MIN_S ||
-        config.rf_guard_max_tx_in_window_s > config.rf_guard_window_s) {
-        error = "RF guard max_tx_in_window_s must be <= window_s";
-        return false;
-    }
+
     return true;
 }
 
@@ -948,6 +948,7 @@ void process_rpc_request(const String &json_text) {
         }
 
         send_rpc_success(request_variant);
+        net_audio_link_reload_server_config();
         return;
     }
 
@@ -1015,7 +1016,7 @@ void disable_ble() {
     g_ble_transport_connected = false;
     g_ble_authenticated = false;
     g_ble_idle_since_ms = 0;
-    g_ble_rpc_rx_buffer = "";
+    reset_ble_rpc();
     notify_status();
     Serial.println("[BLE] Disabled.");
 }
@@ -1222,6 +1223,7 @@ void connectivity_manager_update() {
     // 处理 BLE 客户端断开
     if (g_evt_ble_disconnected) {
         g_evt_ble_disconnected = false;
+        reset_ble_rpc();
         g_ble_transport_connected = false;
         g_ble_authenticated = false;
         g_ble_idle_since_ms = millis();
@@ -1251,11 +1253,16 @@ void connectivity_manager_update() {
     }
 
     // 处理完整的 RPC 指令请求
-    if (g_evt_rpc_ready) {
-        g_evt_rpc_ready = false;
-        process_rpc_request(g_ble_rpc_rx_buffer);
-        g_ble_rpc_rx_buffer = "";
+    String rpc_request;
+    {
+        std::lock_guard<std::mutex> lock(g_ble_rpc_mutex);
+        if (g_evt_rpc_ready) {
+            rpc_request = g_ble_rpc_pending;
+            g_ble_rpc_pending = "";
+            g_evt_rpc_ready = false;
+        }
     }
+    if (rpc_request.length() > 0) process_rpc_request(rpc_request);
 
     // ===============================================
     // 常规主循环更新逻辑
@@ -1278,20 +1285,6 @@ void connectivity_manager_update() {
     }
 
     refresh_status_icons();
-}
-
-bool connectivity_manager_handle_encoder_event(EC11Event event, int32_t value) {
-    (void)value;
-
-    if (!g_ble_popup_visible) {
-        return false;
-    }
-
-    if (event == EC11Event::BUTTON_CLICK) {
-        hide_ble_popup();
-    }
-
-    return true;
 }
 
 bool connectivity_manager_set_ble_enabled(bool enable, bool show_popup) {

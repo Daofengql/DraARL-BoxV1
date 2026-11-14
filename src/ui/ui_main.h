@@ -35,6 +35,9 @@ extern lv_obj_t * ui_nodeLatency;
 extern lv_obj_t * ui_server;
 extern lv_obj_t * ui_configsync;
 extern lv_obj_t * ui_serverstat;
+extern lv_obj_t *ui_radioDetails;
+extern lv_obj_t *ui_modeHint;
+extern lv_obj_t *ui_inputHint;
 // CUSTOM VARIABLES
 
 #ifdef __cplusplus

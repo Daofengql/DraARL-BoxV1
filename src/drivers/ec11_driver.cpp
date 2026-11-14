@@ -1,6 +1,7 @@
 #include "ec11_driver.h"
 
 #include "../config.h"
+#include "button_input.h"
 
 namespace {
 EC11Callback event_callback = nullptr;
@@ -8,11 +9,7 @@ EC11Callback event_callback = nullptr;
 int32_t counter = 0;
 EC11Direction last_direction = EC11Direction::NONE;
 
-bool button_pressed = false;
-bool button_last_raw_state = false;
-bool button_stable_state = false;
-uint32_t button_pressed_at_ms = 0;
-uint32_t button_last_change_at_ms = 0;
+button_input::Button button;
 uint32_t long_press_threshold_ms = 800;
 uint32_t button_debounce_ms = 25;
 
@@ -148,11 +145,7 @@ bool ec11_init(void) {
 
     counter = 0;
     last_direction = EC11Direction::NONE;
-    button_pressed = false;
-    button_last_raw_state = (digitalRead(EC11_SW) == LOW);
-    button_stable_state = button_last_raw_state;
-    button_pressed_at_ms = 0;
-    button_last_change_at_ms = millis();
+    button.reset(digitalRead(EC11_SW) == LOW, millis(), true);
     rotate_speed = 1;
     last_rotate_time = 0;
     last_rotation_emit_at_ms = 0;
@@ -165,11 +158,7 @@ bool ec11_init(void) {
 
 void ec11_deinit(void) {
     event_callback = nullptr;
-    button_pressed = false;
-    button_last_raw_state = false;
-    button_stable_state = false;
-    button_pressed_at_ms = 0;
-    button_last_change_at_ms = 0;
+    button.reset(false, 0);
     last_direction = EC11Direction::NONE;
     counter = 0;
     last_rotate_time = 0;
@@ -193,7 +182,7 @@ void ec11_reset_counter(int32_t value) {
 }
 
 bool ec11_get_button_state(void) {
-    return button_pressed;
+    return button.pressed();
 }
 
 EC11Direction ec11_get_direction(void) {
@@ -211,6 +200,14 @@ void ec11_set_debounce(uint32_t debounce_ms) {
 
 void ec11_set_long_press_threshold(uint32_t threshold_ms) {
     long_press_threshold_ms = threshold_ms;
+}
+
+void ec11_discard_pending_input() {
+    reset_event_queue();
+    last_encoder_state = read_encoder_state();
+    encoder_accumulator = 0;
+    last_rotation_emit_at_ms = 0;
+    button.reset(digitalRead(EC11_SW) == LOW, millis(), true);
 }
 
 void ec11_update(void) {
@@ -232,32 +229,12 @@ void ec11_update(void) {
         }
     }
 
-    const bool current_button_raw = (digitalRead(EC11_SW) == LOW);
-    if (current_button_raw != button_last_raw_state) {
-        button_last_raw_state = current_button_raw;
-        button_last_change_at_ms = now;
-    }
-
-    if (current_button_raw != button_stable_state &&
-        (now - button_last_change_at_ms) >= button_debounce_ms) {
-        button_stable_state = current_button_raw;
-
-        if (button_stable_state) {
-            button_pressed = true;
-            button_pressed_at_ms = now;
-            queue_event(EC11Event::BUTTON_PRESS, 0);
-        } else {
-            button_pressed = false;
-            const uint32_t duration = now - button_pressed_at_ms;
-
-            queue_event(EC11Event::BUTTON_RELEASE, static_cast<int32_t>(duration));
-            if (duration >= long_press_threshold_ms) {
-                queue_event(EC11Event::BUTTON_LONG_PRESS, static_cast<int32_t>(duration));
-            } else {
-                queue_event(EC11Event::BUTTON_CLICK, static_cast<int32_t>(duration));
-            }
-        }
-    }
+    const auto events = button.update(digitalRead(EC11_SW) == LOW, now,
+                                      long_press_threshold_ms, button_debounce_ms);
+    if (events.pressed) queue_event(EC11Event::BUTTON_PRESS, 0);
+    if (events.released) queue_event(EC11Event::BUTTON_RELEASE, events.duration_ms);
+    if (events.long_press) queue_event(EC11Event::BUTTON_LONG_PRESS, events.duration_ms);
+    if (events.click) queue_event(EC11Event::BUTTON_CLICK, events.duration_ms);
 
     QueuedEvent event = {};
     while (pop_event(event)) {

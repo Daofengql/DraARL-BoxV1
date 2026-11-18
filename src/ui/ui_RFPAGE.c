@@ -20,18 +20,22 @@ void ui_RFPAGE_screen_init(void)
 {
     ui_RFPAGE = ui_screen_create();
     ui_make_header(ui_RFPAGE, "射频", &ui_header2, &ui_logo2, &ui_title1, &ui_wifistat1, &ui_hasNewUpdate1);
-    ui_PWP = ui_panel_create(ui_RFPAGE, 8, 38, 304, 58);
-    ui_PWL = ui_text(ui_PWP, "功率", 12, 20, 100, &ui_font_system20, UI_TEXT);
-    ui_PWN = ui_text(ui_PWP, "高", 202, 22, 40, &ui_font_system, UI_ACCENT);
-    ui_PWS = ui_toggle(ui_PWP, 250, 18);
-    lv_obj_t *summary = ui_panel_create(ui_RFPAGE, 8, 104, 304, 96);
-    ui_text(summary, "SA818", 12, 11, 94, &lv_font_montserrat_14, UI_MUTED);
-    ui_rfModule = ui_text(summary, "--", 112, 11, 178, &lv_font_montserrat_14, UI_ACCENT);
-    ui_text(summary, "TX", 12, 39, 32, &lv_font_montserrat_12, UI_MUTED);
-    ui_rfTx = ui_text(summary, "--", 56, 36, 234, &lv_font_montserrat_18, UI_TEXT);
-    ui_text(summary, "RX", 12, 69, 32, &lv_font_montserrat_12, UI_MUTED);
-    ui_rfRx = ui_text(summary, "--", 56, 66, 234, &lv_font_montserrat_18, UI_TEXT);
-    ui_text(ui_RFPAGE, "Press: toggle power   KEY0: back", 10, 222, 300, &lv_font_montserrat_12, UI_MUTED);
+    ui_PWP = ui_panel_create(ui_RFPAGE, 8, 36, 304, 58);
+    ui_PWL = ui_text(ui_PWP, "功率", 12, 19, 100, &ui_font_system20, UI_TEXT);
+    ui_PWN = ui_text(ui_PWP, "高", 196, 21, 46, &ui_font_system, UI_ACCENT);
+    lv_obj_set_style_text_align(ui_PWN, LV_TEXT_ALIGN_RIGHT, 0);
+    ui_PWS = ui_toggle(ui_PWP, 252, 18);
+    lv_obj_t *summary = ui_panel_create(ui_RFPAGE, 8, 102, 304, 98);
+    ui_text(summary, "SA818", 12, 12, 94, &lv_font_montserrat_14, UI_MUTED);
+    ui_rfModule = ui_text(summary, "--", 112, 12, 180, &lv_font_montserrat_14, UI_ACCENT);
+    lv_obj_set_style_text_align(ui_rfModule, LV_TEXT_ALIGN_RIGHT, 0);
+    ui_text(summary, "TX", 12, 40, 32, &lv_font_montserrat_12, UI_MUTED);
+    ui_rfTx = ui_text(summary, "--", 56, 37, 236, &lv_font_montserrat_18, UI_TEXT);
+    ui_text(summary, "RX", 12, 70, 32, &lv_font_montserrat_12, UI_MUTED);
+    ui_rfRx = ui_text(summary, "--", 56, 67, 236, &lv_font_montserrat_18, UI_TEXT);
+    lv_obj_t *hint = ui_text(ui_RFPAGE, "Press: toggle power   KEY0: back", 8, 220, 304, &lv_font_montserrat_12, UI_MUTED);
+    lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_long_mode(hint, LV_LABEL_LONG_CLIP);
 }
 
 void ui_RFPAGE_screen_destroy(void)

@@ -20,7 +20,7 @@ void ui_InfoPage_screen_init(void)
 {
     ui_InfoPage = ui_screen_create();
     ui_make_header(ui_InfoPage, "关于", &ui_header4, &ui_logo4, &ui_title3, &ui_wifistat3, &ui_hasNewUpdate3);
-    ui_InfoP1 = ui_panel_create(ui_InfoPage, 8, 38, 304, 174);
+    ui_InfoP1 = ui_panel_create(ui_InfoPage, 8, 36, 304, 174);
     lv_obj_add_flag(ui_InfoP1, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_scroll_dir(ui_InfoP1, LV_DIR_VER);
     lv_obj_set_flex_flow(ui_InfoP1, LV_FLEX_FLOW_COLUMN);
@@ -38,9 +38,12 @@ void ui_InfoPage_screen_init(void)
         lv_obj_t *label = ui_text(row, names[i], 0, 0, 64, &ui_font_system, UI_MUTED);
         if (i == 0) ui_Label5 = label;
         *values[i] = ui_text(row, "--", 0, 0, 208, &lv_font_montserrat_14, UI_TEXT);
+        lv_obj_set_style_pad_top(*values[i], 1, 0);
         lv_label_set_long_mode(*values[i], LV_LABEL_LONG_WRAP);
     }
-    ui_text(ui_InfoPage, "Turn: scroll   Press / KEY0: back", 8, 222, 304, &lv_font_montserrat_12, UI_MUTED);
+    lv_obj_t *hint = ui_text(ui_InfoPage, "Turn: scroll   Press / KEY0: back", 8, 220, 304, &lv_font_montserrat_12, UI_MUTED);
+    lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_long_mode(hint, LV_LABEL_LONG_CLIP);
 }
 
 void ui_InfoPage_screen_destroy(void)

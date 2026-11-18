@@ -1098,7 +1098,7 @@ void update_selection_border_state() {
     const uint32_t border_color = active_highlight_color();
 
     if (is_frequency_stage()) {
-        apply_selection_border(ui_Freq, border_color, 4);
+        apply_selection_border(ui_Freq, border_color, 2);
         return;
     }
 

@@ -16,7 +16,6 @@ lv_obj_t * ui_header = NULL;
 lv_obj_t * ui_logo = NULL;
 lv_obj_t * ui_time = NULL;
 lv_obj_t * ui_wifistat = NULL;
-lv_obj_t * ui_bluestat = NULL;
 lv_obj_t * ui_hasNewUpdate = NULL;
 lv_obj_t * ui_toSetting = NULL;
 lv_obj_t * ui_nodeLatency = NULL;
@@ -31,7 +30,7 @@ lv_obj_t *ui_inputHint = NULL;
 void ui_main_screen_init(void)
 {
     ui_main = ui_screen_create();
-    ui_make_header(ui_main, "", &ui_header, &ui_logo, &ui_time, &ui_wifistat, &ui_bluestat, &ui_hasNewUpdate);
+    ui_make_header(ui_main, "", &ui_header, &ui_logo, &ui_time, &ui_wifistat, &ui_hasNewUpdate);
     lv_obj_set_style_text_font(ui_time, &lv_font_montserrat_16, 0);
     lv_label_set_text(ui_time, "--:--");
     ui_mainContainer = ui_panel_create(ui_main, 8, 36, 304, 148);
@@ -103,7 +102,6 @@ void ui_main_screen_destroy(void)
     ui_logo = NULL;
     ui_time = NULL;
     ui_wifistat = NULL;
-    ui_bluestat = NULL;
     ui_hasNewUpdate = NULL;
     ui_toSetting = NULL;
     ui_nodeLatency = NULL;

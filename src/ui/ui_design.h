@@ -52,16 +52,15 @@ static inline lv_obj_t *ui_status_image(lv_obj_t *parent, const void *source, in
 }
 static inline void ui_make_header(lv_obj_t *screen, const char *title, lv_obj_t **header,
                                  lv_obj_t **logo, lv_obj_t **heading, lv_obj_t **wifi,
-                                 lv_obj_t **ble, lv_obj_t **update) {
+                                 lv_obj_t **update) {
     *header = ui_panel_create(screen, 0, 0, 320, 30);
     lv_obj_set_style_radius(*header, 0, 0);
     lv_obj_set_style_border_width(*header, 0, 0);
     *logo = ui_text(*header, "DraARL", 10, 7, 70, &lv_font_montserrat_14, UI_ACCENT);
     *heading = ui_text(*header, title, 88, 5, 126, &ui_font_system20, UI_TEXT);
     lv_obj_set_style_text_align(*heading, LV_TEXT_ALIGN_CENTER, 0);
-    *update = ui_status_image(*header, &ui_img_browser_updated_24dp_e3e3e3_fill0_wght400_grad0_opsz24_png, 230);
+    *update = ui_status_image(*header, &ui_img_browser_updated_24dp_e3e3e3_fill0_wght400_grad0_opsz24_png, 258);
     lv_obj_add_flag(*update, LV_OBJ_FLAG_HIDDEN);
-    *ble = ui_status_image(*header, &ui_img_bluetooth_disabled_24dp_e3e3e3_fill0_wght400_grad0_opsz24_png, 258);
     *wifi = ui_status_image(*header, &ui_img_wifi_bad_png, 286);
 }
 static inline lv_obj_t *ui_toggle(lv_obj_t *parent, int x, int y) {

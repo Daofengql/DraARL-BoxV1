@@ -25,7 +25,6 @@ extern lv_obj_t * ui_header4;
 extern lv_obj_t * ui_logo4;
 extern lv_obj_t * ui_title3;
 extern lv_obj_t * ui_wifistat3;
-extern lv_obj_t * ui_bluestat3;
 extern lv_obj_t * ui_hasNewUpdate3;
 // CUSTOM VARIABLES
 

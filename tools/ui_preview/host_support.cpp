@@ -10,7 +10,7 @@ namespace preview {
 uint32_t now_ms = 0;
 int pins[64];
 bool rf_present = true, rf_tx = false, rf_rx = false, storage_ok = true, hardware_ok = true;
-bool ble_popup = false, bind_popup = false, sleeping = false, ble_enabled = false;
+bool softap_popup = false, bind_popup = false, sleeping = false, softap_enabled = false;
 int radio_writes = 0, brightness_writes = 0, sync_requests = 0;
 float backlight = 1;
 device_config::DeviceConfig stored;
@@ -19,7 +19,7 @@ bool autostart = false, rf_enabled = false;
 void reset() {
     std::fill(std::begin(pins), std::end(pins), HIGH);
     rf_present = storage_ok = hardware_ok = true;
-    rf_tx = rf_rx = ble_popup = bind_popup = sleeping = ble_enabled = autostart = rf_enabled = false;
+    rf_tx = rf_rx = softap_popup = bind_popup = sleeping = softap_enabled = autostart = rf_enabled = false;
     radio_writes = brightness_writes = sync_requests = 0;
     now_ms = 100;
     backlight = 1;
@@ -90,12 +90,13 @@ bool sa818_set_ctcss_rx(uint16_t) { return true; }
 bool sa818_set_cdcss_tx(uint16_t, bool) { return true; }
 bool sa818_set_cdcss_rx(uint16_t, bool) { return true; }
 
-bool connectivity_manager_is_ble_enabled() { return preview::ble_enabled; }
-bool connectivity_manager_set_ble_enabled(bool v, bool) { preview::ble_enabled = v; return true; }
-const char *connectivity_manager_get_ble_auth_code() { return "246810"; }
-const char *connectivity_manager_get_ble_device_name() { return "DraARL-F967E0"; }
-bool connectivity_manager_is_ble_popup_visible() { return preview::ble_popup; }
-void connectivity_manager_hide_ble_popup() { preview::ble_popup = false; }
+bool connectivity_manager_is_softap_enabled() { return preview::softap_enabled; }
+bool connectivity_manager_set_softap_enabled(bool v, bool) { preview::softap_enabled = v; return true; }
+const char *connectivity_manager_get_softap_ssid() { return "DraARL-BoxV1-TEST"; }
+const char *connectivity_manager_get_softap_password() { return "88888888"; }
+const char *connectivity_manager_get_softap_ip() { return "192.168.4.1"; }
+bool connectivity_manager_is_setup_popup_visible() { return preview::softap_popup; }
+void connectivity_manager_hide_setup_popup() { preview::softap_popup = false; }
 bool net_audio_link_is_bind_popup_visible() { return preview::bind_popup; }
 void net_audio_link_hide_bind_popup() { preview::bind_popup = false; }
 void net_audio_link_schedule_radio_config_sync() { ++preview::sync_requests; }

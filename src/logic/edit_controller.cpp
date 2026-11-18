@@ -56,7 +56,7 @@ enum class EditMode {
 enum class SettingsCursor : uint8_t {
     BRIGHTNESS = 0,
     UPDATE,
-    BLE,
+    SOFTAP,
     AUTOSTART,
     RF,
     ABOUT,
@@ -64,7 +64,7 @@ enum class SettingsCursor : uint8_t {
 
 constexpr SettingsCursor SETTINGS_CURSOR_SEQUENCE[] = {
     SettingsCursor::BRIGHTNESS,
-    SettingsCursor::BLE,
+    SettingsCursor::SOFTAP,
     SettingsCursor::AUTOSTART,
     SettingsCursor::UPDATE,
     SettingsCursor::RF,
@@ -147,12 +147,12 @@ bool screen_locked = false;
 lv_obj_t *power_popup = nullptr;
 lv_obj_t *power_popup_option_labels[3] = {nullptr, nullptr, nullptr};
 PowerMenuOption power_popup_option = PowerMenuOption::CANCEL;
-uint32_t last_settings_ble_refresh_ms = 0;
+uint32_t last_settings_softap_refresh_ms = 0;
 bool update_available = false;
 uint32_t last_info_refresh_ms = 0;
-bool settings_ble_widgets_initialized = false;
-bool settings_ble_enabled_snapshot = false;
-char settings_ble_text_snapshot[33] = {0};
+bool settings_softap_widgets_initialized = false;
+bool settings_softap_enabled_snapshot = false;
+char settings_softap_text_snapshot[33] = {0};
 bool radio_module_ready = false;
 
 void apply_main_screen_overrides();
@@ -881,7 +881,7 @@ void show_power_popup() {
     }
 
     apply_screen_lock(false);
-    connectivity_manager_hide_ble_popup();
+    connectivity_manager_hide_setup_popup();
     net_audio_link_hide_bind_popup();
 
     power_popup_option = PowerMenuOption::CANCEL;
@@ -1336,33 +1336,33 @@ void set_radio_power_high(bool high, bool persist, bool schedule_sync) {
     refresh_rf_page_widgets();
 }
 
-void refresh_settings_ble_widgets() {
-    const bool ble_enabled = connectivity_manager_is_ble_enabled();
-    if (ui_BLES) {
-        if (!settings_ble_widgets_initialized || settings_ble_enabled_snapshot != ble_enabled) {
-            if (ble_enabled) {
-                lv_obj_add_state(ui_BLES, LV_STATE_CHECKED);
+void refresh_settings_softap_widgets() {
+    const bool ap_enabled = connectivity_manager_is_softap_enabled();
+    if (ui_SoftAPS) {
+        if (!settings_softap_widgets_initialized || settings_softap_enabled_snapshot != ap_enabled) {
+            if (ap_enabled) {
+                lv_obj_add_state(ui_SoftAPS, LV_STATE_CHECKED);
             } else {
-                lv_obj_clear_state(ui_BLES, LV_STATE_CHECKED);
+                lv_obj_clear_state(ui_SoftAPS, LV_STATE_CHECKED);
             }
         }
     }
 
-    const char *ble_text = ble_enabled
-        ? connectivity_manager_get_ble_auth_code()
-        : connectivity_manager_get_ble_device_name();
-    if (!ble_text) {
-        ble_text = "";
+    const char *ap_text = ap_enabled
+        ? connectivity_manager_get_softap_ip()
+        : "OFF";
+    if (!ap_text) {
+        ap_text = "";
     }
-    if (!settings_ble_widgets_initialized ||
-        strncmp(settings_ble_text_snapshot, ble_text, sizeof(settings_ble_text_snapshot)) != 0) {
-        set_label_text_or_empty(ui_BLEN, ble_text);
-        strncpy(settings_ble_text_snapshot, ble_text, sizeof(settings_ble_text_snapshot) - 1);
-        settings_ble_text_snapshot[sizeof(settings_ble_text_snapshot) - 1] = '\0';
+    if (!settings_softap_widgets_initialized ||
+        strncmp(settings_softap_text_snapshot, ap_text, sizeof(settings_softap_text_snapshot)) != 0) {
+        set_label_text_or_empty(ui_SoftAPN, ap_text);
+        strncpy(settings_softap_text_snapshot, ap_text, sizeof(settings_softap_text_snapshot) - 1);
+        settings_softap_text_snapshot[sizeof(settings_softap_text_snapshot) - 1] = '\0';
     }
 
-    settings_ble_enabled_snapshot = ble_enabled;
-    settings_ble_widgets_initialized = true;
+    settings_softap_enabled_snapshot = ap_enabled;
+    settings_softap_widgets_initialized = true;
 }
 
 void refresh_settings_selection_state() {
@@ -1371,7 +1371,7 @@ void refresh_settings_selection_state() {
         : "Turn: select   Press: open   KEY0: back");
     clear_selection_border(ui_lightP);
     clear_selection_border(ui_autoupdate);
-    clear_selection_border(ui_BLEP);
+    clear_selection_border(ui_SoftAPP);
     clear_selection_border(ui_autostart);
     clear_selection_border(ui_RFP);
     clear_selection_border(ui_InfoP);
@@ -1388,8 +1388,8 @@ void refresh_settings_selection_state() {
         case SettingsCursor::UPDATE:
             target = ui_autoupdate;
             break;
-        case SettingsCursor::BLE:
-            target = ui_BLEP;
+        case SettingsCursor::SOFTAP:
+            target = ui_SoftAPP;
             break;
         case SettingsCursor::AUTOSTART:
             target = ui_autostart;
@@ -1426,7 +1426,7 @@ void refresh_settings_page_widgets() {
         else lv_obj_add_state(ui_RFP, LV_STATE_DISABLED);
         lv_obj_set_style_opa(ui_RFP, radio_module_ready ? LV_OPA_COVER : LV_OPA_40, 0);
     }
-    refresh_settings_ble_widgets();
+    refresh_settings_softap_widgets();
     refresh_settings_autostart_widget();
     refresh_update_button_state();
     refresh_settings_selection_state();
@@ -1552,10 +1552,10 @@ void step_backlight(int32_t delta) {
     apply_backlight_pwm(static_cast<uint8_t>(next), false);
 }
 
-void toggle_ble_from_settings() {
-    const bool target = !connectivity_manager_is_ble_enabled();
-    connectivity_manager_set_ble_enabled(target, false);
-    refresh_settings_ble_widgets();
+void toggle_softap_from_settings() {
+    const bool target = !connectivity_manager_is_softap_enabled();
+    connectivity_manager_set_softap_enabled(target, target);
+    refresh_settings_softap_widgets();
 }
 
 void toggle_radio_power_from_rf_page() {
@@ -1580,7 +1580,7 @@ void on_settings_button_click() {
                 settings_mode = SettingsMode::EDIT;
                 break;
             case SettingsCursor::UPDATE: edit_controller_on_update_button_click(); break;
-            case SettingsCursor::BLE: toggle_ble_from_settings(); break;
+            case SettingsCursor::SOFTAP: toggle_softap_from_settings(); break;
             case SettingsCursor::AUTOSTART: toggle_autostart_from_settings(); break;
             case SettingsCursor::RF: open_rf_page(); break;
             case SettingsCursor::ABOUT: open_info_page(); break;
@@ -1780,9 +1780,9 @@ void edit_controller_init() {
     auto_start_enabled = device_config::load_auto_start_enabled();
     screen_locked = false;
     radio_cfg_dirty = false;
-    settings_ble_widgets_initialized = false;
-    settings_ble_enabled_snapshot = false;
-    settings_ble_text_snapshot[0] = '\0';
+    settings_softap_widgets_initialized = false;
+    settings_softap_enabled_snapshot = false;
+    settings_softap_text_snapshot[0] = '\0';
     log_radio_config("LOADED");
     set_edit_stage(EditStage::NONE);
     refresh_settings_page_widgets();
@@ -1848,12 +1848,12 @@ void edit_controller_update() {
     const ActiveScreen screen = get_active_screen();
 
     if (screen == ActiveScreen::SETTINGS) {
-        if (last_settings_ble_refresh_ms == 0 || (now_ms - last_settings_ble_refresh_ms) >= 250) {
-            last_settings_ble_refresh_ms = now_ms;
-            refresh_settings_ble_widgets();
+        if (last_settings_softap_refresh_ms == 0 || (now_ms - last_settings_softap_refresh_ms) >= 250) {
+            last_settings_softap_refresh_ms = now_ms;
+            refresh_settings_softap_widgets();
         }
     } else {
-        last_settings_ble_refresh_ms = 0;
+        last_settings_softap_refresh_ms = 0;
     }
 
     if (screen == ActiveScreen::INFO) {
@@ -1905,8 +1905,8 @@ void edit_controller_on_encoder_event(EC11Event event, int32_t value) {
         if (click) execute_power_popup_action();
         return;
     }
-    if (connectivity_manager_is_ble_popup_visible()) {
-        if (click || hold) connectivity_manager_hide_ble_popup();
+    if (connectivity_manager_is_setup_popup_visible()) {
+        if (click || hold) connectivity_manager_hide_setup_popup();
         return;
     }
     if (net_audio_link_is_bind_popup_visible()) {
@@ -1984,8 +1984,8 @@ void edit_controller_on_key0_short_press() {
         hide_power_popup_internal();
         return;
     }
-    if (connectivity_manager_is_ble_popup_visible()) {
-        connectivity_manager_hide_ble_popup();
+    if (connectivity_manager_is_setup_popup_visible()) {
+        connectivity_manager_hide_setup_popup();
         return;
     }
     if (net_audio_link_is_bind_popup_visible()) {

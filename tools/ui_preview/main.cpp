@@ -153,7 +153,7 @@ static void check_navigation() {
     check(lv_scr_act() == ui_main, "settings returns in one KEY0 press");
 
     reset(); settings(); turn(1); press();
-    check(preview::ble_enabled, "settings rotates immediately and toggles BLE in one press");
+    check(preview::softap_enabled, "settings rotates immediately and toggles SoftAP in one press");
     turn(1); press(); turn(1); press();
     check(lv_scr_act() == ui_RFPAGE, "disabled update is skipped when navigating to RF");
     press();
@@ -215,11 +215,11 @@ static void check_navigation() {
     check(edit_controller_is_power_popup_visible() && lv_slider_get_value(ui_LightS) == 180, "power menu works on subpages and cancels brightness draft");
     turn(1); press();
     check(preview::backlight == 0, "lock turns off the backlight");
-    preview::ble_popup = true;
+    preview::softap_popup = true;
     press();
-    check(preview::backlight > 0 && preview::ble_popup, "wake consumes gesture before BLE popup");
+    check(preview::backlight > 0 && preview::softap_popup, "wake consumes gesture before SoftAP popup");
     back();
-    check(!preview::ble_popup && lv_scr_act() == ui_SettingPAGE, "KEY0 dismisses BLE modal without navigating underneath");
+    check(!preview::softap_popup && lv_scr_act() == ui_SettingPAGE, "KEY0 dismisses SoftAP modal without navigating underneath");
     back();
     preview::bind_popup = true; press();
     check(!preview::bind_popup && !edit_controller_is_editing(), "binding modal consumes the dismissal gesture");
@@ -292,7 +292,7 @@ static void render_scenes(const char *folder) {
     press(); turn(-10);
     capture(folder, "17-brightness", "亮度预览", "旋转实时预览亮度，确认仅保存一次；KEY0 恢复进入编辑前的亮度。");
     back(); turn(1); press();
-    capture(folder, "18-settings-ble", "蓝牙与认证码", "打开 BLE 后在设置行显示认证码；该码区别于服务器动态绑定码。");
+    capture(folder, "18-settings-softap", "SoftAP 配网设置", "开启 SoftAP 后在设置行显示热点 IP 地址。");
     turn(1); press();
     capture(folder, "19-settings-autostart", "自启动开关", "旋转选择，按一次切换。返回后保留当前焦点。");
     edit_controller_set_update_available(true); turn(1);
@@ -312,7 +312,7 @@ static void render_scenes(const char *folder) {
     turn(1);
     capture(folder, "27-power-off", "关机选项", "确认关机前释放 PTT，并关闭背光后进入深度睡眠。");
     back(); reset(false); press();
-    capture(folder, "28-settings-network", "网络模式设置", "射频入口变暗且不参与旋钮导航，音频与 IO 配置仍由 BLE / 服务端管理。");
+    capture(folder, "28-settings-network", "网络模式设置", "射频入口变暗且不参与旋钮导航，音频与 IO 配置仍由 SoftAP / 服务端管理。");
     reset(); press(); turn(4); press(); turn(1); preview::storage_ok = false; press();
     capture(folder, "29-save-failed", "保存失败可重试", "写入失败时保留草稿并显示提示，按下重试或 KEY0 撤销，不静默丢失修改。");
     FILE *manifest = std::fopen((std::string(folder) + "/scenes.tsv").c_str(), "wb");

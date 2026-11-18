@@ -1,0 +1,456 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>DraARL BoxV1 · Wi-Fi 配网</title>
+  <style>
+    :root {
+      --bg:#0b1623; --surface:#102132; --surface-hover:#182d40; --line:#30475c;
+      --text:#f0f0f0; --muted:#91a6bc; --cyan:#72c8df; --orange:#ff9f30;
+      --green:#00ff9d; --red:#ff7b7b;
+      --mono:"JetBrains Mono","Cascadia Mono",Consolas,"Microsoft YaHei",monospace;
+    }
+    * { box-sizing:border-box; }
+    [hidden] { display:none !important; }
+    html { color-scheme:dark; }
+    body {
+      margin:0; min-height:100dvh; background-color:var(--bg); color:var(--text);
+      background-image:linear-gradient(#1c2b3a66 1px,transparent 1px),linear-gradient(90deg,#1c2b3a66 1px,transparent 1px);
+      background-size:32px 32px;
+      font:15px/1.6 system-ui,-apple-system,"Segoe UI","Microsoft YaHei","PingFang SC",sans-serif;
+    }
+    button,input,select { font:inherit; }
+    button,summary { -webkit-tap-highlight-color:transparent; }
+    button { cursor:pointer; }
+    :focus-visible { outline:2px solid var(--orange); outline-offset:3px; }
+    .shell { width:min(1080px,calc(100% - 64px)); margin:auto; padding:32px 0; }
+    .brand { display:flex; align-items:center; justify-content:space-between; gap:16px; border-bottom:1px solid var(--line); padding-bottom:16px; }
+    .brand-name { font:600 17px var(--mono); letter-spacing:-.03em; }
+    .brand-name span { color:var(--cyan); }
+    .edition { font:11px var(--mono); letter-spacing:.15em; color:var(--muted); }
+    .page-title { display:flex; align-items:flex-end; justify-content:space-between; margin:28px 0 20px; gap:16px; }
+    h1,h2,p { margin:0; }
+    h1 { font-size:32px; font-weight:650; line-height:1.3; letter-spacing:-.035em; }
+    .intro { color:var(--muted); margin-top:6px; font-size:14px; }
+    .section-id { color:var(--cyan); font:11px var(--mono); letter-spacing:.12em; }
+    .connection {
+      display:flex; align-items:center; justify-content:space-between; gap:24px; padding:18px 22px;
+      border:1px solid var(--line); border-left:3px solid var(--cyan); background:var(--surface);
+    }
+    .connection-main { display:flex; align-items:center; gap:16px; min-width:0; }
+    .wifi-icon { width:24px; height:24px; flex-shrink:0; color:var(--cyan); }
+    .connection-copy { min-width:0; }
+    .overline { font-size:11px; color:var(--muted); letter-spacing:.08em; }
+    .connection-name { font-size:17px; font-weight:600; overflow-wrap:anywhere; }
+    .connection-meta { color:var(--muted); font:12px/1.6 var(--mono); margin-top:2px; }
+    .badge { white-space:nowrap; font-size:12px; color:var(--muted); }
+    .badge::before { content:""; display:inline-block; width:6px; height:6px; margin-right:7px; background:currentColor; }
+    .badge.online { color:var(--green); }
+    .badge.waiting { color:var(--orange); }
+    .message { min-height:24px; margin:8px 0; font-size:13px; color:var(--muted); }
+    .message.error { color:var(--red); }
+    .main-grid { display:grid; grid-template-columns:minmax(0,1.25fr) minmax(0,1fr); gap:24px; align-items:start; }
+    .panel { min-width:0; background:var(--surface); border:1px solid var(--line); position:relative; }
+    .panel::before { content:""; position:absolute; left:-1px; top:-1px; width:8px; height:8px; border-top:2px solid var(--cyan); border-left:2px solid var(--cyan); pointer-events:none; }
+    .panel-head { padding:18px 20px 16px; display:flex; justify-content:space-between; align-items:center; gap:12px; border-bottom:1px solid var(--line); }
+    .panel-heading { display:flex; align-items:center; gap:10px; }
+    h2 { font-size:16px; line-height:1.5; font-weight:600; }
+    .count { font:11px var(--mono); padding:1px 6px; border:1px solid var(--line); color:var(--muted); }
+    .panel-foot { padding:14px 20px; border-top:1px solid var(--line); color:var(--muted); font-size:12px; }
+    .panel-foot button { padding:0; background:transparent; border:0; min-height:32px; color:var(--cyan); font-size:13px; }
+    .network-list { padding:4px 0; min-height:210px; }
+    .network-choice { display:flex; align-items:center; gap:14px; width:100%; text-align:left; color:var(--text); background:transparent; border:0; border-bottom:1px solid #30475c77; padding:15px 20px; min-height:72px; }
+    .network-choice:last-child { border-bottom:0; }
+    .network-choice:hover { background:var(--surface-hover); }
+    .network-title { font-size:15px; font-weight:500; overflow-wrap:anywhere; }
+    .network-copy { min-width:0; flex:1; }
+    .network-meta { color:var(--muted); font-size:12px; margin-top:2px; }
+    .chevron { color:var(--cyan); font-size:18px; }
+    .profile { padding:14px 20px; border-bottom:1px solid #30475c77; }
+    .profile:last-child { border-bottom:0; }
+    .profile-top { display:flex; align-items:center; gap:12px; justify-content:space-between; }
+    .profile-name { min-width:0; overflow-wrap:anywhere; font-weight:500; }
+    .profile-meta { font-size:12px; color:var(--muted); margin-top:2px; }
+    .profile-actions { display:flex; align-items:center; gap:8px; margin-top:10px; }
+    .profile-actions .delete { margin-left:auto; color:var(--muted); }
+    .profile-actions .delete:hover { color:var(--red); }
+    .empty { padding:38px 20px; display:grid; gap:8px; justify-items:center; text-align:center; color:var(--muted); font-size:13px; }
+    .empty .wifi-icon { width:32px; height:32px; opacity:.7; margin-bottom:4px; }
+    .button { min-height:40px; padding:8px 14px; border:1px solid var(--line); border-radius:0; background:transparent; color:var(--text); font-size:13px; transition:background-color 150ms,border-color 150ms,color 150ms; }
+    .button:hover { background:var(--surface-hover); border-color:var(--cyan); }
+    .button.primary { background:var(--orange); color:var(--bg); border-color:var(--orange); font-weight:600; }
+    .button.primary:hover { background:#eb922c; border-color:#eb922c; }
+    .button.danger { color:var(--red); }
+    .button:disabled { opacity:.4; cursor:default; }
+    .button.small { min-height:32px; padding:4px 9px; font-size:12px; }
+    .button.icon { padding:4px 9px; }
+    .button-row { display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-top:20px; }
+    .settings { margin-top:24px; }
+    details { border:1px solid var(--line); background:#102132cc; }
+    details + details { margin-top:12px; }
+    summary { padding:16px 20px; cursor:pointer; display:flex; align-items:center; justify-content:space-between; gap:12px; list-style:none; }
+    summary::-webkit-details-marker { display:none; }
+    summary::after { content:"+"; color:var(--cyan); font:20px var(--mono); }
+    details[open] summary::after { content:"−"; }
+    details[open] summary { border-bottom:1px solid var(--line); }
+    .summary-copy { display:flex; align-items:center; gap:12px; flex-wrap:wrap; font-size:14px; }
+    .summary-copy small { color:var(--muted); font-size:12px; font-weight:400; }
+    .settings-body { padding:20px; }
+    .form-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:16px; }
+    .field { display:grid; gap:6px; min-width:0; }
+    .form-grid > .full { grid-column:1/-1; }
+    label { font-size:13px; color:var(--muted); }
+    input,select { width:100%; min-height:44px; padding:10px 12px; border:1px solid var(--line); border-radius:0; background:var(--bg); color:var(--text); }
+    input:focus,select:focus { outline:2px solid var(--orange); outline-offset:2px; }
+    .network-toggle { display:flex; align-items:center; justify-content:space-between; min-height:44px; gap:16px; }
+    input[type="checkbox"] { width:22px; height:22px; min-height:22px; padding:0; accent-color:var(--orange); }
+    input[aria-invalid="true"] { border-color:var(--red); }
+    .hint { font-size:12px; color:var(--muted); }
+    .error-text { min-height:20px; color:var(--red); font-size:13px; margin-top:8px; }
+    .maintenance { display:flex; align-items:center; justify-content:space-between; gap:24px; }
+    .maintenance p { color:var(--muted); font-size:13px; max-width:60ch; }
+    .footer { display:flex; justify-content:space-between; gap:16px; margin-top:24px; font:10px var(--mono); color:var(--muted); letter-spacing:.08em; }
+    dialog { width:min(460px,calc(100% - 32px)); max-height:calc(100dvh - 32px); padding:24px; border:1px solid var(--cyan); border-radius:0; background:var(--surface); color:var(--text); }
+    dialog::backdrop { background:#020a13cf; }
+    dialog h2 { font-size:20px; margin:4px 0 8px; overflow-wrap:anywhere; }
+    .dialog-head { display:flex; align-items:center; justify-content:space-between; gap:16px; margin-bottom:16px; }
+    .close { background:transparent; border:0; color:var(--muted); font-size:24px; width:36px; height:36px; padding:0; }
+    dialog .field + .field { margin-top:16px; }
+    dialog .button-row { justify-content:flex-end; }
+    dialog p { color:var(--muted); font-size:14px; overflow-wrap:anywhere; }
+    @media (max-width:760px) {
+      .shell { width:calc(100% - 32px); padding:20px 0; }
+      .page-title { margin:20px 0 16px; }
+      .page-title > .section-id { display:none; }
+      h1 { font-size:28px; }
+      .main-grid { grid-template-columns:1fr; gap:16px; }
+      .connection { padding:14px 16px; gap:10px; align-items:flex-start; }
+      .connection-main { gap:12px; }
+      .connection-name { font-size:15px; }
+      .connection-meta { font-size:11px; }
+      .badge { font-size:11px; margin-top:2px; }
+      .network-list { min-height:180px; }
+      .panel-head,.profile,.network-choice { padding-left:16px; padding-right:16px; }
+      .settings { margin-top:16px; }
+      .button { min-height:44px; }
+      .button.small { min-height:36px; }
+      .form-grid { grid-template-columns:1fr; }
+      .maintenance { align-items:flex-start; flex-direction:column; gap:16px; }
+      summary,.settings-body { padding:16px; }
+      .summary-copy { gap:2px; flex-direction:column; align-items:flex-start; }
+      .edition { font-size:9px; letter-spacing:.07em; }
+    }
+    @media (prefers-reduced-motion:reduce) { * { transition:none !important; } }
+  </style>
+</head>
+<body class="bp-theme">
+  <div class="shell">
+    <header class="brand"><div class="brand-name">DraARL <span>/ BoxV1</span></div><span class="edition">NETWORK SETUP</span></header>
+    <div class="page-title"><div><h1>连接到 Wi-Fi</h1><p class="intro">选择网络，让 BoxV1 自动记住并连接。</p></div><span class="section-id">01 / CONNECTIVITY</span></div>
+    <section class="connection" aria-label="当前连接">
+      <div class="connection-main">
+        <svg class="wifi-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M2 8a16 16 0 0 1 20 0M5 12a11 11 0 0 1 14 0M8.5 16a5.5 5.5 0 0 1 7 0"/><circle cx="12" cy="20" r="1" fill="currentColor" stroke="none"/></svg>
+        <div class="connection-copy"><div class="overline">当前网络</div><div class="connection-name" id="current-ssid">正在读取设备状态</div><div class="connection-meta" id="current-meta">--</div></div>
+      </div><span class="badge" id="connection-state">读取中</span>
+    </section>
+    <p class="message" id="feedback" role="status" aria-live="polite"></p>
+    <main>
+      <div class="main-grid">
+        <section class="panel" aria-labelledby="nearby-title">
+          <div class="panel-head"><div class="panel-heading"><h2 id="nearby-title">附近网络</h2><span class="count" id="scan-count">--</span></div><button class="button primary" type="button" id="scan">扫描网络</button></div>
+          <div class="network-list" id="scan-list"><div class="empty"><p>点击「扫描网络」查找附近的 Wi-Fi</p><span>仅支持 2.4 GHz 网络</span></div></div>
+          <div class="panel-foot">找不到网络？ <button type="button" id="manual-add">手动输入 SSID →</button></div>
+        </section>
+        <section class="panel" aria-labelledby="saved-title">
+          <div class="panel-head"><div class="panel-heading"><h2 id="saved-title">已保存</h2><span class="count" id="profile-count">0 / 8</span></div><span class="section-id">AUTO CONNECT</span></div>
+          <div id="profiles"><div class="empty">正在读取保存列表…</div></div>
+          <p class="panel-foot">自动优先连接信号更强的已保存网络；列表顺序作为补充尝试顺序。</p>
+        </section>
+      </div>
+      <div class="settings">
+        <details id="advanced">
+          <summary><span class="summary-copy"><strong>更多设置</strong><small>服务器、呼号、认证信息</small></span></summary>
+          <div class="settings-body">
+            <form id="advanced-form">
+              <div class="form-grid">
+                <div class="field full"><label for="api-url">HTTP API 地址</label><input id="api-url" name="api_url" type="url" required placeholder="https://ptt.4l2.cn" autocomplete="url" spellcheck="false"></div>
+                <div class="field"><label for="callsign">呼号 (Callsign)</label><input id="callsign" name="callsign" placeholder="如 BI4XYZ" autocomplete="off" spellcheck="false"></div>
+                <div class="field"><label for="node-ssid">SSID 编号 (0-254)</label><input id="node-ssid" name="node_ssid" type="number" min="0" max="254" placeholder="0"></div>
+                <div class="field"><label for="dmr-id">DMR ID</label><input id="dmr-id" name="dmr_id" type="number" placeholder="460xxxx"></div>
+                <div class="field"><label for="account">服务器账号</label><input id="account" name="account" autocomplete="off" spellcheck="false"></div>
+                <div class="field"><label for="device-password">设备认证密码</label><input id="device-password" name="device_password" type="password" autocomplete="new-password"></div>
+              </div>
+              <p class="error-text" id="advanced-error" role="alert"></p>
+              <div class="button-row"><button class="button primary" type="submit" id="save-advanced">保存设置</button><span class="hint">只保存你修改的项目。</span></div>
+            </form>
+          </div>
+        </details>
+        <details id="maintenance">
+          <summary><span class="summary-copy"><strong>设备维护</strong><small>恢复出厂设置</small></span></summary>
+          <div class="settings-body maintenance"><p>清除全部 Wi-Fi、服务器、绑定和本地设置。设备将重启，重新进入配网。</p><div style="display:flex;gap:12px;flex-wrap:wrap"><button class="button" type="button" id="reboot-device">重启设备</button><button class="button danger" type="button" id="factory-reset">恢复出厂设置</button></div></div>
+        </details>
+      </div>
+    </main>
+    <footer class="footer"><span>DRAARL / BOXV1</span><span>NETWORK CONFIGURATION</span></footer>
+  </div>
+  <dialog id="network-dialog" aria-labelledby="network-title">
+    <div class="dialog-head"><span class="section-id">ADD NETWORK</span><button class="close" type="button" id="network-close" aria-label="关闭网络配置">×</button></div>
+    <h2 id="network-title">连接网络</h2>
+    <p id="network-hint">保存后设备会自动记住这个网络。</p>
+    <form id="profile-form" style="margin-top:20px">
+      <div class="field"><label for="ssid">Wi-Fi 名称（SSID）</label><input id="ssid" name="ssid" required autocomplete="off" autocapitalize="none" spellcheck="false"></div>
+      <div class="field"><label for="password">Wi-Fi 密码</label><input id="password" name="wifi_password" type="password" autocomplete="new-password" placeholder="开放网络可留空"></div>
+      <p class="error-text" id="profile-error" role="alert"></p>
+      <div class="button-row"><button class="button" type="button" id="network-cancel">取消</button><button class="button primary" id="save-profile" type="submit">保存并连接</button></div>
+    </form>
+  </dialog>
+  <dialog id="confirm-dialog" aria-labelledby="confirm-title">
+    <span class="section-id">CONFIRM ACTION</span><h2 id="confirm-title">请确认</h2><p id="confirm-message"></p>
+    <div class="button-row"><button class="button" id="confirm-cancel" type="button" autofocus>取消</button><button class="button danger" id="confirm-ok" type="button">确认</button></div>
+  </dialog>
+  <script>
+    const $ = id => document.getElementById(id);
+    const dirty = new Set();
+    const disabledState = new Map();
+    let state = null, pending = false, refreshing = false, rebooting = false, pendingConfirm = null, profileSignature = '';
+    const wifiSvg = '<svg class="wifi-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M2 8a16 16 0 0 1 20 0M5 12a11 11 0 0 1 14 0M8.5 16a5.5 5.5 0 0 1 7 0"/><circle cx="12" cy="20" r="1" fill="currentColor" stroke="none"/></svg>';
+    function element(tag, className, text) {
+      const node = document.createElement(tag);
+      if (className) node.className = className;
+      if (text !== undefined) node.textContent = text;
+      return node;
+    }
+    function feedback(text, error = false) {
+      $('feedback').textContent = text;
+      $('feedback').classList.toggle('error', error);
+    }
+    async function api(path, method = 'GET', data) {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 12000);
+      try {
+        const response = await fetch('/api/' + path, {
+          method, cache: 'no-store', signal: controller.signal,
+          ...(data === undefined ? {} : {headers: {'Content-Type': 'application/json'}, body: JSON.stringify(data)})
+        });
+        const value = await response.json();
+        if (!response.ok || value.ok === false) throw new Error(value.error || '操作失败，请重试');
+        return value.data;
+      } catch (error) {
+        if (error.name === 'AbortError' || error instanceof TypeError) throw new Error('设备暂时无响应，请稍后重试');
+        throw error;
+      } finally { clearTimeout(timer); }
+    }
+    function setDisabled(value) {
+      if (value) document.querySelectorAll('button,input,select').forEach(control => {
+        disabledState.set(control, control.disabled); control.disabled = true;
+      });
+      else {
+        disabledState.forEach((disabled, control) => { control.disabled = disabled; });
+        disabledState.clear();
+      }
+    }
+    async function perform(message, action, errorTarget) {
+      if (pending) return;
+      pending = true;
+      setDisabled(true);
+      feedback(message);
+      if (errorTarget) $(errorTarget).textContent = '';
+      try { await action(); }
+      catch (error) {
+        feedback(error.message, true);
+        if (errorTarget) $(errorTarget).textContent = error.message;
+      } finally { pending = false; if (!rebooting) setDisabled(false); }
+    }
+    function actionButton(text, label, onClick, disabled = false) {
+      const button = element('button', 'button small', text);
+      button.type = 'button'; button.setAttribute('aria-label', label); button.disabled = disabled;
+      button.addEventListener('click', onClick);
+      return button;
+    }
+    function renderProfiles(profiles) {
+      const signature = JSON.stringify(profiles.map(profile => [profile.ssid, profile.connected]));
+      if (signature === profileSignature) return;
+      profileSignature = signature;
+      const list = $('profiles'); list.replaceChildren();
+      $('profile-count').textContent = profiles.length + ' / 8';
+      if (!profiles.length) {
+        list.append(element('div', 'empty', '还没有保存的网络。选择左侧或上方的 Wi-Fi 开始配网。'));
+        return;
+      }
+      profiles.forEach((profile, index) => {
+        const item = element('div', 'profile');
+        const top = element('div', 'profile-top');
+        top.append(element('div', 'profile-name', profile.ssid));
+        if (profile.connected) top.append(element('span', 'badge online', '已连接'));
+        const meta = element('div', 'profile-meta', profile.connected ? '已记住 · 断网后自动重连' : '已保存 · 自动连接');
+        const actions = element('div', 'profile-actions');
+        const remove = actionButton('删除', '删除 ' + profile.ssid, () => removeProfile(profile.ssid)); remove.classList.add('delete');
+        actions.append(
+          actionButton('连接', '连接 ' + profile.ssid, () => connectProfile(profile.ssid), profile.connected),
+          actionButton('↑', '上移 ' + profile.ssid, () => moveProfile(profile.ssid, -1), index === 0),
+          actionButton('↓', '下移 ' + profile.ssid, () => moveProfile(profile.ssid, 1), index === profiles.length - 1),
+          remove
+        );
+        item.append(top, meta, actions); list.append(item);
+      });
+    }
+    function renderStatus(value) {
+      state = value;
+      for (const [id, key] of [['wifi-enabled', 'wifi_enabled'], ['cellular-enabled', 'cellular_enabled']]) {
+        if (!dirty.has(id)) $(id).checked = !!value.config[key];
+      }
+      if (value.restarting) {
+        rebooting = true;
+        feedback('网络设置已保存，设备正在重启。请重新连接；重新开启 Wi-Fi 可使用 OLED 的 SYSTEM → NETWORK → WiFi → ENABLE。');
+      }
+      const connected = value.wifi_connected;
+      $('current-ssid').textContent = connected ? value.wifi_ssid : '等待连接 Wi-Fi';
+      $('current-meta').textContent = connected ? 'IP ' + value.ip + '  /  ' + value.wifi_rssi + ' dBm' : '从附近网络中选择，或手动输入名称';
+      $('connection-state').textContent = connected ? '已连接' : '未连接';
+      $('connection-state').className = 'badge ' + (connected ? 'online' : 'waiting');
+      renderProfiles(value.profiles || []);
+      for (const [id, key] of [
+        ['api-url', 'api_url'],
+        ['callsign', 'callsign'],
+        ['node-ssid', 'node_ssid'],
+        ['dmr-id', 'dmr_id'],
+        ['account', 'account'],
+        ['device-password', 'device_password']
+      ]) {
+        if (!dirty.has(id)) $(id).value = value.config[key] !== undefined ? value.config[key] : '';
+      }
+    }
+    async function refresh() {
+      if (refreshing || rebooting) return;
+      refreshing = true;
+      try { renderStatus(await api('status')); } finally { refreshing = false; }
+    }
+    function profileIndex(ssid) {
+      const index = state ? state.profiles.findIndex(profile => profile.ssid === ssid) : -1;
+      if (index < 0) throw new Error('保存列表已改变，请刷新后重试');
+      return index;
+    }
+    async function enableWifi() {
+      if (!state.config.wifi_enabled) {
+        renderStatus(await api('config', 'POST', {wifi_enabled: true}));
+        return false;
+      }
+      return true;
+    }
+    function connectProfile(ssid) {
+      perform('正在连接 ' + ssid + '…', async () => {
+        if (!await enableWifi()) return;
+        renderStatus(await api('profiles/' + profileIndex(ssid) + '/connect', 'POST'));
+        feedback('正在连接 ' + ssid + '，成功后约 10 秒自动关闭配网热点。');
+      });
+    }
+    function moveProfile(ssid, direction) {
+      perform('正在保存网络顺序…', async () => {
+        renderStatus(await api('profiles/' + profileIndex(ssid) + '/move', 'POST', {direction}));
+        feedback('网络顺序已保存。');
+      });
+    }
+    function askConfirm(title, message, action) {
+      pendingConfirm = action;
+      $('confirm-title').textContent = title; $('confirm-message').textContent = message;
+      $('confirm-dialog').showModal();
+    }
+    function removeProfile(ssid) {
+      askConfirm('删除这个网络？', ssid + ' 将从自动连接列表中移除。', async () => {
+        renderStatus(await api('profiles/' + profileIndex(ssid), 'DELETE'));
+        feedback('已删除 ' + ssid);
+      });
+    }
+    function openNetwork(record) {
+      $('profile-form').reset(); $('profile-error').textContent = '';
+      $('ssid').value = record ? record.ssid : ''; $('ssid').readOnly = !!record;
+      $('network-title').textContent = record ? record.ssid : '手动添加网络';
+      $('network-hint').textContent = record && !record.secure ? '这是开放网络，无需输入密码。' : '保存后设备会自动记住这个网络。';
+      $('password').closest('.field').hidden = !!record && !record.secure;
+      $('network-dialog').showModal();
+      (record && record.secure ? $('password') : $('ssid')).focus();
+    }
+    function renderScan(records) {
+      const list = $('scan-list'); list.replaceChildren();
+      $('scan-count').textContent = records.length;
+      if (!records.length) { list.append(element('div', 'empty', '未发现附近网络。可重新扫描，或手动输入 SSID。')); return; }
+      records.forEach(record => {
+        const button = element('button', 'network-choice'); button.type = 'button';
+        const icon = element('span'); icon.innerHTML = wifiSvg;
+        const copy = element('span', 'network-copy');
+        const saved = state && state.profiles.some(profile => profile.ssid === record.ssid);
+        copy.append(element('span', 'network-title', record.ssid), element('div', 'network-meta', (saved ? '已保存' : record.secure ? '需要密码' : '开放网络') + ' · ' + record.rssi + ' dBm'));
+        button.append(icon, copy, element('span', 'chevron', '›'));
+        button.addEventListener('click', () => saved ? connectProfile(record.ssid) : openNetwork(record));
+        list.append(button);
+      });
+    }
+    $('scan').addEventListener('click', () => perform('正在扫描附近网络…', async () => {
+      const records = await api('scan'); renderScan(records); feedback('扫描完成，发现 ' + records.length + ' 个网络。');
+    }));
+    $('manual-add').addEventListener('click', () => openNetwork(null));
+    for (const id of ['network-cancel', 'network-close']) $(id).addEventListener('click', () => $('network-dialog').close());
+    $('network-dialog').addEventListener('close', () => { $('profile-form').reset(); $('profile-error').textContent = ''; });
+    $('confirm-cancel').addEventListener('click', () => { pendingConfirm = null; $('confirm-dialog').close(); });
+    $('confirm-dialog').addEventListener('cancel', () => { pendingConfirm = null; });
+    $('confirm-ok').addEventListener('click', () => {
+      const action = pendingConfirm; pendingConfirm = null; $('confirm-dialog').close();
+      if (action) perform('正在执行…', action);
+    });
+    $('profile-form').addEventListener('submit', event => {
+      event.preventDefault();
+      const ssid = $('ssid').value, password = $('password').value;
+      const bytes = text => new TextEncoder().encode(text).length;
+      if (!ssid || bytes(ssid) > 32 || (password && (bytes(password) < 8 || bytes(password) > 63))) {
+        $('profile-error').textContent = 'SSID 需为 1–32 字节；密码需为 8–63 字节，开放网络可留空。';
+        return;
+      }
+      perform('正在保存并连接…', async () => {
+        renderStatus(await api('profiles', 'POST', {ssid, password}));
+        $('network-dialog').close();
+        if (!await enableWifi()) return;
+        renderStatus(await api('profiles/' + profileIndex(ssid) + '/connect', 'POST'));
+        feedback('已保存 ' + ssid + '，正在连接；成功后约 10 秒自动关闭配网热点。');
+      }, 'profile-error');
+    });
+    $('advanced-form').addEventListener('input', event => {
+      const input = event.target;
+      dirty.add(input.id);
+      if (input.type === 'checkbox' && input.checked) {
+        const other = $(input.id === 'wifi-enabled' ? 'cellular-enabled' : 'wifi-enabled');
+        other.checked = false;
+        dirty.add(other.id);
+      }
+    });
+    $('advanced-form').addEventListener('submit', event => {
+      event.preventDefault();
+      const payload = {};
+      for (const input of $('advanced-form').querySelectorAll('input,select')) {
+        if (!dirty.has(input.id)) continue;
+        payload[input.name] = input.type === 'number' ? Number(input.value) : input.value;
+      }
+      if (!Object.keys(payload).length) { feedback('没有需要保存的修改。'); return; }
+      const save = async () => {
+        const response = await api('config', 'POST', payload);
+        dirty.clear();
+        renderStatus(response);
+        if (!response.restarting) feedback('设置已保存。');
+      };
+      perform('正在保存设置…', save, 'advanced-error');
+    });
+        $('reboot-device').addEventListener('click', () => askConfirm('重启设备？', '设备将重新启动并尝试连接已保存的 Wi-Fi。', async () => {
+      await api('reboot', 'POST'); feedback('设备正在重启，请稍后重新连接。');
+    }));
+    $('factory-reset').addEventListener('click', () => askConfirm('恢复出厂设置？', '所有 Wi-Fi、服务器、绑定和本地设置都会清除，设备随后重启。', async () => {
+      await api('factory-reset', 'POST'); feedback('设备正在重启，请稍后重新连接。');
+    }));
+    refresh().then(() => feedback('选择网络开始配置；状态每 3 秒自动更新。')).catch(error => feedback(error.message, true));
+    setInterval(() => {
+      if (pending || document.hidden) return;
+      refresh().catch(error => feedback(error.message, true));
+    }, 3000);
+  </script>
+</body>
+</html>

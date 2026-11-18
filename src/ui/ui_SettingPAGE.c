@@ -9,10 +9,10 @@ lv_obj_t * ui_autoupdate = NULL;
 lv_obj_t * ui_Label8 = NULL;
 lv_obj_t * ui_updateBT = NULL;
 lv_obj_t * ui_Label10 = NULL;
-lv_obj_t * ui_BLEP = NULL;
+lv_obj_t * ui_SoftAPP = NULL;
 lv_obj_t * ui_Label2 = NULL;
-lv_obj_t * ui_BLES = NULL;
-lv_obj_t * ui_BLEN = NULL;
+lv_obj_t * ui_SoftAPS = NULL;
+lv_obj_t * ui_SoftAPN = NULL;
 lv_obj_t * ui_autostart = NULL;
 lv_obj_t * ui_Label6 = NULL;
 lv_obj_t * ui_StartS = NULL;
@@ -26,7 +26,6 @@ lv_obj_t * ui_header3 = NULL;
 lv_obj_t * ui_logo3 = NULL;
 lv_obj_t * ui_title2 = NULL;
 lv_obj_t * ui_wifistat2 = NULL;
-lv_obj_t * ui_bluestat2 = NULL;
 lv_obj_t * ui_hasNewUpdate2 = NULL;
 lv_obj_t *ui_settingsHint = NULL;
 
@@ -34,17 +33,17 @@ lv_obj_t *ui_settingsHint = NULL;
 void ui_SettingPAGE_screen_init(void)
 {
     ui_SettingPAGE = ui_screen_create();
-    ui_make_header(ui_SettingPAGE, "设置", &ui_header3, &ui_logo3, &ui_title2, &ui_wifistat2, &ui_bluestat2, &ui_hasNewUpdate2);
+    ui_make_header(ui_SettingPAGE, "设置", &ui_header3, &ui_logo3, &ui_title2, &ui_wifistat2, &ui_hasNewUpdate2);
     ui_lightP = ui_panel_create(ui_SettingPAGE, 8, 38, 304, 28);
     ui_Label1 = ui_text(ui_lightP, "亮度", 10, 7, 44, &ui_font_system, UI_TEXT);
     ui_LightS = lv_slider_create(ui_lightP);
     lv_obj_set_pos(ui_LightS, 72, 12);
     lv_obj_set_size(ui_LightS, 210, 6);
-    ui_BLEP = ui_panel_create(ui_SettingPAGE, 8, 72, 304, 32);
-    ui_Label2 = ui_text(ui_BLEP, "蓝牙", 10, 8, 44, &ui_font_system, UI_TEXT);
-    ui_BLEN = ui_text(ui_BLEP, "DraARL", 64, 8, 180, &lv_font_montserrat_14, UI_MUTED);
-    lv_label_set_long_mode(ui_BLEN, LV_LABEL_LONG_SCROLL_CIRCULAR);
-    ui_BLES = ui_toggle(ui_BLEP, 252, 5);
+    ui_SoftAPP = ui_panel_create(ui_SettingPAGE, 8, 72, 304, 32);
+    ui_Label2 = ui_text(ui_SoftAPP, "SoftAP", 10, 8, 54, &lv_font_montserrat_14, UI_TEXT);
+    ui_SoftAPN = ui_text(ui_SoftAPP, "OFF", 68, 8, 175, &lv_font_montserrat_14, UI_MUTED);
+    lv_label_set_long_mode(ui_SoftAPN, LV_LABEL_LONG_SCROLL_CIRCULAR);
+    ui_SoftAPS = ui_toggle(ui_SoftAPP, 252, 5);
     ui_autostart = ui_panel_create(ui_SettingPAGE, 8, 110, 148, 30);
     ui_Label6 = ui_text(ui_autostart, "自启动", 10, 7, 74, &ui_font_system, UI_TEXT);
     ui_StartS = ui_toggle(ui_autostart, 96, 4);
@@ -80,10 +79,10 @@ void ui_SettingPAGE_screen_destroy(void)
     ui_Label8 = NULL;
     ui_updateBT = NULL;
     ui_Label10 = NULL;
-    ui_BLEP = NULL;
+    ui_SoftAPP = NULL;
     ui_Label2 = NULL;
-    ui_BLES = NULL;
-    ui_BLEN = NULL;
+    ui_SoftAPS = NULL;
+    ui_SoftAPN = NULL;
     ui_autostart = NULL;
     ui_Label6 = NULL;
     ui_StartS = NULL;
@@ -97,7 +96,6 @@ void ui_SettingPAGE_screen_destroy(void)
     ui_logo3 = NULL;
     ui_title2 = NULL;
     ui_wifistat2 = NULL;
-    ui_bluestat2 = NULL;
     ui_hasNewUpdate2 = NULL;
     ui_settingsHint = NULL;
 

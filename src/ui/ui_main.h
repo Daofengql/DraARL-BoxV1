@@ -28,7 +28,6 @@ extern lv_obj_t * ui_header;
 extern lv_obj_t * ui_logo;
 extern lv_obj_t * ui_time;
 extern lv_obj_t * ui_wifistat;
-extern lv_obj_t * ui_bluestat;
 extern lv_obj_t * ui_hasNewUpdate;
 extern lv_obj_t * ui_toSetting;
 extern lv_obj_t * ui_nodeLatency;

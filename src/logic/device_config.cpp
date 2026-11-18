@@ -160,6 +160,28 @@ void load_server_config(Preferences &prefs, ServerConfig &config) {
     sanitize_server_config(config);
 }
 
+void load_wifi_profiles(Preferences &prefs, DeviceConfig &config) {
+    config.wifi_profile_count = prefs.getUChar("wifi_p_cnt", 0);
+    if (config.wifi_profile_count > MAX_WIFI_PROFILES) {
+        config.wifi_profile_count = MAX_WIFI_PROFILES;
+    }
+    for (uint8_t i = 0; i < config.wifi_profile_count; ++i) {
+        char key_s[16], key_p[16];
+        snprintf(key_s, sizeof(key_s), "wifi_s_%u", i);
+        snprintf(key_p, sizeof(key_p), "wifi_p_%u", i);
+        load_optional_string(prefs, key_s, config.wifi_profiles[i].ssid, sizeof(config.wifi_profiles[i].ssid));
+        load_optional_string(prefs, key_p, config.wifi_profiles[i].password, sizeof(config.wifi_profiles[i].password));
+    }
+    if (config.wifi_profile_count == 0 && config.wifi.ssid[0] != '\0') {
+        config.wifi_profile_count = 1;
+        copy_cstr(config.wifi_profiles[0].ssid, config.wifi.ssid);
+        copy_cstr(config.wifi_profiles[0].password, config.wifi.password);
+    } else if (config.wifi_profile_count > 0 && config.wifi.ssid[0] == '\0') {
+        copy_cstr(config.wifi.ssid, config.wifi_profiles[0].ssid);
+        copy_cstr(config.wifi.password, config.wifi_profiles[0].password);
+    }
+}
+
 bool server_defaults_changed() {
     return strcmp(DEFAULT_SERVER_HTTP_API_BASE_URL, LEGACY_SERVER_HTTP_API_BASE_URL) != 0;
 }
@@ -171,6 +193,8 @@ void set_defaults(DeviceConfig &config) {
     set_defaults(config.radio);
     set_defaults(config.server);
     set_defaults(config.ota);
+    config.wifi_profile_count = 0;
+    memset(config.wifi_profiles, 0, sizeof(config.wifi_profiles));
 }
 
 void set_defaults(WiFiConfig &config) {
@@ -224,6 +248,7 @@ bool load(DeviceConfig &config) {
     load_radio_config(prefs, config.radio);
     load_server_config(prefs, config.server);
     load_ota_config(prefs, config.ota);
+    load_wifi_profiles(prefs, config);
     const bool legacy_ota_url_present = prefs.isKey("ota_url");
     prefs.end();
 
@@ -286,6 +311,22 @@ bool save(const DeviceConfig &config) {
     prefs.putString("wifi_mask", config.wifi.subnet);
     prefs.putString("wifi_dns1", config.wifi.dns1);
     prefs.putString("wifi_dns2", config.wifi.dns2);
+    prefs.putUChar("wifi_p_cnt", config.wifi_profile_count);
+    for (uint8_t i = 0; i < config.wifi_profile_count; ++i) {
+        char key_s[16], key_p[16];
+        snprintf(key_s, sizeof(key_s), "wifi_s_%u", i);
+        snprintf(key_p, sizeof(key_p), "wifi_p_%u", i);
+        prefs.putString(key_s, config.wifi_profiles[i].ssid);
+        prefs.putString(key_p, config.wifi_profiles[i].password);
+    }
+    for (uint8_t i = config.wifi_profile_count; i < MAX_WIFI_PROFILES; ++i) {
+        char key_s[16], key_p[16];
+        snprintf(key_s, sizeof(key_s), "wifi_s_%u", i);
+        snprintf(key_p, sizeof(key_p), "wifi_p_%u", i);
+        prefs.remove(key_s);
+        prefs.remove(key_p);
+    }
+
 
     prefs.putULong("radio_tx", config.radio.tx_frequency_x10000);
     prefs.putULong("radio_rx", config.radio.rx_frequency_x10000);
@@ -413,6 +454,78 @@ bool save_auto_start_enabled(bool enabled) {
     const bool ok = prefs.putBool(AUTO_START_KEY, enabled) > 0;
     prefs.end();
     return ok;
+}
+
+bool factory_reset() {
+    Preferences prefs;
+    if (!prefs.begin(CONFIG_NS, false)) return false;
+    prefs.clear();
+    prefs.end();
+    return true;
+}
+
+bool add_wifi_profile(DeviceConfig &config, const char *ssid, const char *password) {
+    if (!ssid || ssid[0] == '\0') return false;
+    int existing_idx = -1;
+    for (uint8_t i = 0; i < config.wifi_profile_count; ++i) {
+        if (strcmp(config.wifi_profiles[i].ssid, ssid) == 0) {
+            existing_idx = i;
+            break;
+        }
+    }
+    if (existing_idx >= 0) {
+        if (password) copy_cstr(config.wifi_profiles[existing_idx].password, password);
+        if (existing_idx > 0) {
+            WifiProfile tmp = config.wifi_profiles[existing_idx];
+            for (int i = existing_idx; i > 0; --i) {
+                config.wifi_profiles[i] = config.wifi_profiles[i - 1];
+            }
+            config.wifi_profiles[0] = tmp;
+        }
+    } else {
+        uint8_t new_count = config.wifi_profile_count < MAX_WIFI_PROFILES
+            ? config.wifi_profile_count + 1
+            : MAX_WIFI_PROFILES;
+        for (int i = new_count - 1; i > 0; --i) {
+            config.wifi_profiles[i] = config.wifi_profiles[i - 1];
+        }
+        copy_cstr(config.wifi_profiles[0].ssid, ssid);
+        if (password) copy_cstr(config.wifi_profiles[0].password, password);
+        else config.wifi_profiles[0].password[0] = '\0';
+        config.wifi_profile_count = new_count;
+    }
+    copy_cstr(config.wifi.ssid, config.wifi_profiles[0].ssid);
+    copy_cstr(config.wifi.password, config.wifi_profiles[0].password);
+    return save(config);
+}
+
+bool delete_wifi_profile(DeviceConfig &config, size_t index) {
+    if (index >= config.wifi_profile_count) return false;
+    for (size_t i = index; i + 1 < config.wifi_profile_count; ++i) {
+        config.wifi_profiles[i] = config.wifi_profiles[i + 1];
+    }
+    config.wifi_profile_count--;
+    memset(&config.wifi_profiles[config.wifi_profile_count], 0, sizeof(WifiProfile));
+    if (config.wifi_profile_count > 0) {
+        copy_cstr(config.wifi.ssid, config.wifi_profiles[0].ssid);
+        copy_cstr(config.wifi.password, config.wifi_profiles[0].password);
+    } else {
+        config.wifi.ssid[0] = '\0';
+        config.wifi.password[0] = '\0';
+    }
+    return save(config);
+}
+
+bool move_wifi_profile(DeviceConfig &config, size_t index, int direction) {
+    if (direction < 0 && index == 0) return false;
+    if (direction > 0 && index + 1 >= config.wifi_profile_count) return false;
+    size_t target_idx = direction < 0 ? index - 1 : index + 1;
+    WifiProfile tmp = config.wifi_profiles[index];
+    config.wifi_profiles[index] = config.wifi_profiles[target_idx];
+    config.wifi_profiles[target_idx] = tmp;
+    copy_cstr(config.wifi.ssid, config.wifi_profiles[0].ssid);
+    copy_cstr(config.wifi.password, config.wifi_profiles[0].password);
+    return save(config);
 }
 
 } // namespace device_config

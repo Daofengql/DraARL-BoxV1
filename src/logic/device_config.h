@@ -10,6 +10,7 @@ namespace device_config {
 
 constexpr size_t WIFI_SSID_MAX_LEN = 32;
 constexpr size_t WIFI_PASSWORD_MAX_LEN = 64;
+constexpr size_t MAX_WIFI_PROFILES = 8;
 constexpr size_t IPV4_TEXT_MAX_LEN = 15;
 constexpr size_t URL_MAX_LEN = 127;
 constexpr size_t ACCOUNT_MAX_LEN = 31;
@@ -39,6 +40,11 @@ enum class SubAudioType : uint8_t {
 struct SubAudioSetting {
     SubAudioType type;
     uint8_t index;
+};
+
+struct WifiProfile {
+    char ssid[WIFI_SSID_MAX_LEN + 1];
+    char password[WIFI_PASSWORD_MAX_LEN + 1];
 };
 
 struct WiFiConfig {
@@ -91,6 +97,8 @@ struct DeviceConfig {
     RadioConfig radio;
     ServerConfig server;
     OTAConfig ota;
+    uint8_t wifi_profile_count;
+    WifiProfile wifi_profiles[MAX_WIFI_PROFILES];
 };
 
 void set_defaults(DeviceConfig &config);
@@ -105,6 +113,11 @@ bool save_wifi(const WiFiConfig &config);
 bool save_radio(const RadioConfig &config);
 bool save_server(const ServerConfig &config);
 bool save_ota(const OTAConfig &config);
+bool factory_reset();
+
+bool add_wifi_profile(DeviceConfig &config, const char *ssid, const char *password);
+bool delete_wifi_profile(DeviceConfig &config, size_t index);
+bool move_wifi_profile(DeviceConfig &config, size_t index, int direction);
 
 const char *default_server_http_api_base_url();
 const char *legacy_server_http_api_base_url();

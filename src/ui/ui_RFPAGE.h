@@ -22,7 +22,6 @@ extern lv_obj_t * ui_header2;
 extern lv_obj_t * ui_logo2;
 extern lv_obj_t * ui_title1;
 extern lv_obj_t * ui_wifistat1;
-extern lv_obj_t * ui_bluestat1;
 extern lv_obj_t * ui_hasNewUpdate1;
 extern lv_obj_t *ui_rfModule;
 extern lv_obj_t *ui_rfTx;

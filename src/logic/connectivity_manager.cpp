@@ -2,46 +2,33 @@
 
 #include <Arduino.h>
 #include <ArduinoJson.h>
-#include <NimBLEDevice.h>
+#include <DNSServer.h>
 #include <WiFi.h>
 #include <esp_heap_caps.h>
+#include <esp_http_server.h>
+#include <esp_wifi.h>
 #include <lvgl.h>
 
 #include <algorithm>
-#include <cmath>
 #include <cstdio>
 #include <cstring>
-#include <functional>
 #include <mutex>
-#include <string>
+#include <vector>
 
 #include "../ui/ui.h"
 #include "device_config.h"
 #include "edit_controller.h"
 #include "net_audio_link.h"
+#include "web_index_html.h"
 
 namespace {
+
 constexpr uint32_t WIFI_CONNECT_TIMEOUT_MS = 15000;
 constexpr uint32_t WIFI_RETRY_DELAY_MS = 3000;
-constexpr uint32_t WIFI_PROVISIONING_RETRY_DELAY_MS = 10000;
+constexpr uint32_t WIFI_BACKGROUND_RETRY_DELAY_MS = 15000;
 constexpr uint8_t WIFI_BOOT_FAILURE_LIMIT = 3;
-constexpr uint32_t BLE_IDLE_TIMEOUT_MS = 10 * 60 * 1000UL;
-constexpr uint8_t BLE_AUTH_CODE_LEN = 6;
-constexpr size_t BLE_RPC_CHUNK_PAYLOAD = 19;
-constexpr uint32_t WIFI_SCAN_WAIT_BUDGET_MS = 3000;
-constexpr uint32_t WIFI_SCAN_POLL_INTERVAL_MS = 120;
-constexpr uint8_t WIFI_SCAN_CACHE_MAX = 32;
-constexpr int WIFI_SCAN_STATUS_RUNNING = -1;
-constexpr int WIFI_SCAN_STATUS_FAILED = -2;
-
-constexpr char BLE_SERVICE_UUID[] = "6d22f67d-7287-4f4e-8548-b362f9b1f001";
-constexpr char BLE_STATUS_UUID[] = "6d22f67d-7287-4f4e-8548-b362f9b1f002";
-constexpr char BLE_AUTH_UUID[] = "6d22f67d-7287-4f4e-8548-b362f9b1f003";
-constexpr char BLE_RPC_TX_UUID[] = "6d22f67d-7287-4f4e-8548-b362f9b1f004";
-constexpr char BLE_RPC_RX_UUID[] = "6d22f67d-7287-4f4e-8548-b362f9b1f005";
-
-constexpr uint8_t BLE_CHUNK_FLAG_START = 0x01;
-constexpr uint8_t BLE_CHUNK_FLAG_END = 0x02;
+constexpr uint32_t SETUP_AUTO_CLOSE_DELAY_MS = 10000;
+constexpr uint16_t DNS_PORT = 53;
 
 enum class WiFiState : uint8_t {
     UNINITIALIZED = 0,
@@ -51,12 +38,6 @@ enum class WiFiState : uint8_t {
     FAILED = 4,
 };
 
-enum class BleState : uint8_t {
-    BT_OFF = 0,
-    BT_ADVERTISING = 1,
-    BT_CONNECTED = 2,
-};
-
 device_config::DeviceConfig g_config = {};
 
 bool g_manager_initialized = false;
@@ -64,89 +45,50 @@ bool g_main_screen_ready = false;
 bool g_wifi_attempt_active = false;
 bool g_wifi_manual_disconnect = false;
 bool g_wifi_connected_once = false;
-bool g_wifi_boot_popup_allowed = true;
-bool g_wifi_retry_suspended = false;
 uint8_t g_wifi_boot_failures = 0;
 uint32_t g_wifi_attempt_started_at_ms = 0;
 uint32_t g_wifi_next_retry_at_ms = 0;
+size_t g_wifi_active_profile_index = 0;
 WiFiState g_wifi_state = WiFiState::UNINITIALIZED;
 int32_t g_wifi_rssi = 0;
 
-struct WiFiScanCacheEntry {
-    char ssid[33];
+// SoftAP & Captive Portal state
+bool g_softap_enabled = false;
+bool g_softap_manual = false;
+uint32_t g_softap_stop_at_ms = 0;
+char g_softap_ssid[33] = {0};
+constexpr char SOFTAP_PASSWORD[] = "88888888";
+constexpr char SOFTAP_IP_STR[] = "192.168.4.1";
+
+DNSServer g_dns_server;
+httpd_handle_t g_http_server = nullptr;
+bool g_restarting = false;
+uint32_t g_restart_at_ms = 0;
+
+// Scan cache
+struct ScanEntry {
+    String ssid;
     int32_t rssi;
-    int32_t auth;
+    bool secure;
 };
+std::vector<ScanEntry> g_scan_records;
+uint32_t g_last_scan_ms = 0;
+bool g_scan_running = false;
 
-WiFiScanCacheEntry g_wifi_scan_cache[WIFI_SCAN_CACHE_MAX] = {};
-uint8_t g_wifi_scan_cache_count = 0;
-uint32_t g_wifi_scan_cache_updated_at_ms = 0;
-bool g_wifi_scan_in_progress = false;
+// Popup
+lv_obj_t *g_setup_popup = nullptr;
+lv_obj_t *g_setup_popup_label = nullptr;
+bool g_setup_popup_visible = false;
 
-bool g_ble_stack_initialized = false;
-bool g_ble_enabled = false;
-bool g_ble_transport_connected = false;
-bool g_ble_authenticated = false;
-uint16_t g_ble_conn_id = 0;
-uint32_t g_ble_idle_since_ms = 0;
-char g_ble_auth_code[BLE_AUTH_CODE_LEN + 1] = {0};
-char g_ble_device_name[32] = {0};
-String g_ble_rpc_rx_buffer;
-String g_ble_rpc_pending;
-std::mutex g_ble_rpc_mutex;
-bool g_ble_rpc_started = false;
-
-BLEServer *g_ble_server = nullptr;
-BLEService *g_ble_service = nullptr;
-BLECharacteristic *g_ble_status_char = nullptr;
-BLECharacteristic *g_ble_auth_char = nullptr;
-BLECharacteristic *g_ble_rpc_tx_char = nullptr;
-BLECharacteristic *g_ble_rpc_rx_char = nullptr;
-BLEAdvertising *g_ble_advertising = nullptr;
-
-lv_obj_t *g_ble_popup = nullptr;
-lv_obj_t *g_ble_popup_code_label = nullptr;
-bool g_ble_popup_visible = false;
-
-// ==========================================
-// 【线程安全设计】后台事件标志位
-// ==========================================
-// 以下标志位由 WiFi / BLE 的后台任务置位，主线程进行消费清零
+// Thread-safe event flags from WiFi callbacks
 volatile bool g_evt_wifi_connected = false;
 volatile bool g_evt_wifi_disconnected = false;
-volatile bool g_evt_ble_connected = false;
-volatile bool g_evt_ble_disconnected = false;
-volatile bool g_evt_ble_auth_success = false;
-volatile bool g_evt_ble_auth_failed = false;
-volatile bool g_evt_rpc_ready = false;
 
-const char *wifi_state_label(WiFiState state) {
-    switch (state) {
-        case WiFiState::NO_CONFIG:   return "no-config";
-        case WiFiState::CONNECTING:  return "connecting";
-        case WiFiState::CONNECTED:   return "connected";
-        case WiFiState::FAILED:      return "failed";
-        case WiFiState::UNINITIALIZED:
-        default:                     return "idle";
-    }
-}
-
-template <size_t N>
-void copy_cstr(char (&dest)[N], const char *src) {
-    if (N == 0) return;
-    if (!src) {
-        dest[0] = '\0';
-        return;
-    }
-
-    strncpy(dest, src, N - 1);
-    dest[N - 1] = '\0';
-}
-
-BleState current_ble_state() {
-    if (!g_ble_enabled) return BleState::BT_OFF;
-    if (g_ble_authenticated) return BleState::BT_CONNECTED;
-    return BleState::BT_ADVERTISING;
+void configure_softap_credentials() {
+    if (g_softap_ssid[0] != '\0') return;
+    uint8_t mac[6] = {0};
+    WiFi.macAddress(mac);
+    snprintf(g_softap_ssid, sizeof(g_softap_ssid), "DraARL-BoxV1-%02X%02X", mac[4], mac[5]);
 }
 
 const void *current_wifi_icon() {
@@ -166,948 +108,545 @@ const void *current_wifi_icon() {
     }
 }
 
-const void *current_ble_icon() {
-    switch (current_ble_state()) {
-        case BleState::BT_ADVERTISING:
-            return &ui_img_bluetooth_24dp_e3e3e3_fill0_wght400_grad0_opsz24_png;
-        case BleState::BT_CONNECTED:
-            return &ui_img_bluetooth_connected_24dp_e3e3e3_fill0_wght400_grad0_opsz24_png;
-        case BleState::BT_OFF:
-        default:
-            return &ui_img_bluetooth_disabled_24dp_e3e3e3_fill0_wght400_grad0_opsz24_png;
-    }
-}
-
 void refresh_status_icons() {
     if (!g_main_screen_ready) return;
-    
-    if (ui_wifistat) {
-        lv_img_set_src(ui_wifistat, current_wifi_icon());
-    }
-    if (ui_wifistat1) {
-        lv_img_set_src(ui_wifistat1, current_wifi_icon());
-    }
-    if (ui_wifistat2) {
-        lv_img_set_src(ui_wifistat2, current_wifi_icon());
-    }
-    if (ui_wifistat3) {
-        lv_img_set_src(ui_wifistat3, current_wifi_icon());
-    }
-    if (ui_bluestat) {
-        lv_img_set_src(ui_bluestat, current_ble_icon());
-    }
-    if (ui_bluestat1) {
-        lv_img_set_src(ui_bluestat1, current_ble_icon());
-    }
-    if (ui_bluestat2) {
-        lv_img_set_src(ui_bluestat2, current_ble_icon());
-    }
-    if (ui_bluestat3) {
-        lv_img_set_src(ui_bluestat3, current_ble_icon());
-    }
+    const void *wifi_icon = current_wifi_icon();
+    if (ui_wifistat) lv_img_set_src(ui_wifistat, wifi_icon);
+    if (ui_wifistat1) lv_img_set_src(ui_wifistat1, wifi_icon);
+    if (ui_wifistat2) lv_img_set_src(ui_wifistat2, wifi_icon);
+    if (ui_wifistat3) lv_img_set_src(ui_wifistat3, wifi_icon);
 }
 
 void ensure_popup() {
-    if (g_ble_popup || !g_main_screen_ready) return;
+    if (g_setup_popup || !g_main_screen_ready) return;
 
     lv_obj_t *root = lv_layer_top();
-    g_ble_popup = lv_obj_create(root);
-    lv_obj_remove_style_all(g_ble_popup);
-    lv_obj_set_size(g_ble_popup, LV_PCT(100), LV_PCT(100));
-    lv_obj_set_style_bg_color(g_ble_popup, lv_color_black(), LV_PART_MAIN | LV_STATE_DEFAULT);
-    lv_obj_set_style_bg_opa(g_ble_popup, LV_OPA_60, LV_PART_MAIN | LV_STATE_DEFAULT);
-    lv_obj_add_flag(g_ble_popup, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_clear_flag(g_ble_popup, LV_OBJ_FLAG_SCROLLABLE);
+    g_setup_popup = lv_obj_create(root);
+    lv_obj_remove_style_all(g_setup_popup);
+    lv_obj_set_size(g_setup_popup, LV_PCT(100), LV_PCT(100));
+    lv_obj_set_style_bg_color(g_setup_popup, lv_color_black(), 0);
+    lv_obj_set_style_bg_opa(g_setup_popup, LV_OPA_60, 0);
+    lv_obj_add_flag(g_setup_popup, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_clear_flag(g_setup_popup, LV_OBJ_FLAG_SCROLLABLE);
 
-    lv_obj_t *panel = lv_obj_create(g_ble_popup);
-    lv_obj_set_size(panel, 240, 140);
+    lv_obj_t *panel = lv_obj_create(g_setup_popup);
+    lv_obj_set_size(panel, 260, 150);
     lv_obj_center(panel);
-    lv_obj_set_style_radius(panel, 14, LV_PART_MAIN | LV_STATE_DEFAULT);
-    lv_obj_set_style_bg_color(panel, lv_color_hex(0x16212B), LV_PART_MAIN | LV_STATE_DEFAULT);
-    lv_obj_set_style_bg_opa(panel, LV_OPA_COVER, LV_PART_MAIN | LV_STATE_DEFAULT);
-    lv_obj_set_style_border_color(panel, lv_color_hex(0x3F5872), LV_PART_MAIN | LV_STATE_DEFAULT);
-    lv_obj_set_style_border_width(panel, 1, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_radius(panel, 14, 0);
+    lv_obj_set_style_bg_color(panel, lv_color_hex(0x16212B), 0);
+    lv_obj_set_style_bg_opa(panel, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_color(panel, lv_color_hex(0x3F5872), 0);
+    lv_obj_set_style_border_width(panel, 1, 0);
     lv_obj_clear_flag(panel, LV_OBJ_FLAG_SCROLLABLE);
 
     lv_obj_t *title = lv_label_create(panel);
-    lv_label_set_text(title, "BLE GATT Provisioning");
-    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 14);
-    lv_obj_set_style_text_color(title, lv_color_hex(0xE4F0FF), LV_PART_MAIN | LV_STATE_DEFAULT);
-    lv_obj_set_style_text_font(title, &lv_font_montserrat_16, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_label_set_text(title, "SoftAP Provisioning");
+    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 10);
+    lv_obj_set_style_text_color(title, lv_color_hex(0xE4F0FF), 0);
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_16, 0);
 
-    g_ble_popup_code_label = lv_label_create(panel);
-    lv_obj_align(g_ble_popup_code_label, LV_ALIGN_CENTER, 0, 4);
-    lv_obj_set_style_text_color(g_ble_popup_code_label, lv_color_hex(0x57D7FF), LV_PART_MAIN | LV_STATE_DEFAULT);
-    lv_obj_set_style_text_font(g_ble_popup_code_label, &lv_font_montserrat_22, LV_PART_MAIN | LV_STATE_DEFAULT);
+    g_setup_popup_label = lv_label_create(panel);
+    lv_obj_align(g_setup_popup_label, LV_ALIGN_CENTER, 0, 6);
+    lv_obj_set_style_text_color(g_setup_popup_label, lv_color_hex(0x57D7FF), 0);
+    lv_obj_set_style_text_font(g_setup_popup_label, &lv_font_montserrat_14, 0);
 
     lv_obj_t *hint = lv_label_create(panel);
-    lv_label_set_text(hint, "Short press EC11 to close");
-    lv_obj_align(hint, LV_ALIGN_BOTTOM_MID, 0, -14);
-    lv_obj_set_style_text_color(hint, lv_color_hex(0x95A9BF), LV_PART_MAIN | LV_STATE_DEFAULT);
-    lv_obj_set_style_text_font(hint, &lv_font_montserrat_12, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_label_set_text(hint, "Short press EC11 to dismiss");
+    lv_obj_align(hint, LV_ALIGN_BOTTOM_MID, 0, -10);
+    lv_obj_set_style_text_color(hint, lv_color_hex(0x95A9BF), 0);
+    lv_obj_set_style_text_font(hint, &lv_font_montserrat_12, 0);
 }
 
-void hide_ble_popup() {
+void show_setup_popup() {
     ensure_popup();
-    if (!g_ble_popup) return;
+    if (!g_setup_popup || !g_setup_popup_label) return;
 
-    lv_obj_add_flag(g_ble_popup, LV_OBJ_FLAG_HIDDEN);
-    g_ble_popup_visible = false;
+    configure_softap_credentials();
+    char text[128];
+    snprintf(text, sizeof(text), "SSID: %s\nPWD:  %s\nIP:   %s",
+             g_softap_ssid, SOFTAP_PASSWORD, SOFTAP_IP_STR);
+    lv_label_set_text(g_setup_popup_label, text);
+    lv_obj_clear_flag(g_setup_popup, LV_OBJ_FLAG_HIDDEN);
+    g_setup_popup_visible = true;
 }
 
-void show_ble_popup(const char *reason) {
-    (void)reason;
-    ensure_popup();
-    if (!g_ble_popup) return;
-
-    net_audio_link_hide_bind_popup();
-    edit_controller_hide_power_popup();
-
-    lv_label_set_text(g_ble_popup_code_label, g_ble_auth_code);
-    lv_obj_clear_flag(g_ble_popup, LV_OBJ_FLAG_HIDDEN);
-    lv_obj_move_foreground(g_ble_popup);
-    g_ble_popup_visible = true;
-}
-
-String build_status_payload() {
-    char payload[64] = {0};
-    snprintf(payload,
-             sizeof(payload),
-             "w%u;b%u;a%u;r%ld;f%u",
-             static_cast<unsigned int>(g_wifi_state),
-             static_cast<unsigned int>(current_ble_state()),
-             g_ble_authenticated ? 1U : 0U,
-             static_cast<long>(g_wifi_rssi),
-             static_cast<unsigned int>(g_wifi_boot_failures));
-    return String(payload);
-}
-
-void notify_status() {
-    refresh_status_icons();
-
-    if (!g_ble_status_char) return;
-
-    String payload = build_status_payload();
-    g_ble_status_char->setValue(payload.c_str());
-    g_ble_status_char->notify();
-}
-
-void notify_rpc_json(const String &json) {
-    if (!g_ble_rpc_rx_char) return;
-
-    const size_t total_len = json.length();
-    const char *raw = json.c_str();
-    size_t offset = 0;
-
-    while (offset < total_len) {
-        const size_t chunk_len = std::min(BLE_RPC_CHUNK_PAYLOAD, total_len - offset);
-        uint8_t frame[1 + BLE_RPC_CHUNK_PAYLOAD] = {0};
-        uint8_t flags = 0;
-        if (offset == 0) flags |= BLE_CHUNK_FLAG_START;
-        if (offset + chunk_len >= total_len) flags |= BLE_CHUNK_FLAG_END;
-
-        frame[0] = flags;
-        memcpy(frame + 1, raw + offset, chunk_len);
-        g_ble_rpc_rx_char->setValue(frame, chunk_len + 1);
-        g_ble_rpc_rx_char->notify();
-
-        offset += chunk_len;
-        delay(8);
+void hide_setup_popup() {
+    if (g_setup_popup && g_setup_popup_visible) {
+        lv_obj_add_flag(g_setup_popup, LV_OBJ_FLAG_HIDDEN);
+        g_setup_popup_visible = false;
     }
 }
 
-void send_rpc_error(JsonVariantConst request, const char *error_message) {
-    JsonDocument response;
-    if (!request.isNull() && request["id"].is<int>()) {
-        response["id"] = request["id"].as<int>();
+// Forward declarations of connection logic
+void begin_wifi_connect_attempt(size_t profile_index);
+void start_softap_internal(bool manual, bool show_popup);
+void stop_softap_internal();
+
+// HTTP Response helpers
+esp_err_t send_json(httpd_req_t *req, JsonDocument &doc, int status = 200) {
+    String output;
+    serializeJson(doc, output);
+    httpd_resp_set_type(req, "application/json; charset=utf-8");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    if (status != 200) {
+        httpd_resp_set_status(req, status == 400 ? "400 Bad Request" : "500 Internal Server Error");
     }
-    response["ok"] = false;
-    response["error"] = error_message ? error_message : "unknown";
-
-    String json;
-    serializeJson(response, json);
-    notify_rpc_json(json);
+    return httpd_resp_send(req, output.c_str(), output.length());
 }
 
-String subaudio_type_to_string(device_config::SubAudioType type) {
-    switch (type) {
-        case device_config::SubAudioType::CTCSS: return "CTCSS";
-        case device_config::SubAudioType::CDCSS_N: return "CDCSS_N";
-        case device_config::SubAudioType::CDCSS_I: return "CDCSS_I";
-        case device_config::SubAudioType::OFF:
-        default: return "OFF";
+esp_err_t send_error(httpd_req_t *req, const char *msg, int status = 400) {
+    JsonDocument doc;
+    doc["ok"] = false;
+    doc["error"] = msg;
+    return send_json(req, doc, status);
+}
+
+String get_request_body(httpd_req_t *req, esp_err_t &err) {
+    if (req->content_len > 4096) {
+        err = ESP_ERR_INVALID_SIZE;
+        return "";
     }
-}
-
-device_config::SubAudioType subaudio_type_from_string(const String &value) {
-    if (value.equalsIgnoreCase("CTCSS")) return device_config::SubAudioType::CTCSS;
-    if (value.equalsIgnoreCase("CDCSS_I") || value.equalsIgnoreCase("DCS_I")) return device_config::SubAudioType::CDCSS_I;
-    if (value.equalsIgnoreCase("CDCSS_N") || value.equalsIgnoreCase("DCS") || value.equalsIgnoreCase("DCS_N")) {
-        return device_config::SubAudioType::CDCSS_N;
-    }
-    return device_config::SubAudioType::OFF;
-}
-
-void format_frequency_mhz(uint32_t frequency_x10000, char *buffer, size_t buffer_len) {
-    if (!buffer || buffer_len == 0) return;
-    const uint32_t mhz = frequency_x10000 / 10000UL;
-    const uint32_t decimals = frequency_x10000 % 10000UL;
-    snprintf(buffer, buffer_len, "%03lu.%04lu", static_cast<unsigned long>(mhz), static_cast<unsigned long>(decimals));
-}
-
-bool parse_frequency_value(JsonVariantConst value, uint32_t &out_frequency_x10000) {
-    double mhz = 0.0;
-    if (value.is<const char *>()) {
-        mhz = atof(value.as<const char *>());
-    } else if (value.is<double>()) {
-        mhz = value.as<double>();
-    } else if (value.is<float>()) {
-        mhz = value.as<float>();
-    } else if (value.is<uint32_t>()) {
-        const uint32_t raw = value.as<uint32_t>();
-        if (raw > 100000UL) {
-            out_frequency_x10000 = raw;
-            return true;
+    String body;
+    body.reserve(req->content_len + 1);
+    char buf[256];
+    size_t received = 0;
+    while (received < req->content_len) {
+        int count = httpd_req_recv(req, buf, std::min<size_t>(sizeof(buf) - 1, req->content_len - received));
+        if (count <= 0) {
+            err = count == HTTPD_SOCK_ERR_TIMEOUT ? ESP_ERR_TIMEOUT : ESP_FAIL;
+            return "";
         }
-        mhz = static_cast<double>(raw);
-    } else {
-        return false;
+        buf[count] = '\0';
+        body += buf;
+        received += count;
     }
-    out_frequency_x10000 = static_cast<uint32_t>(std::lround(mhz * 10000.0));
+    err = ESP_OK;
+    return body;
+}
+
+// Web Handlers
+esp_err_t root_get_handler(httpd_req_t *req) {
+    httpd_resp_set_type(req, "text/html; charset=utf-8");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    httpd_resp_set_hdr(req, "Content-Encoding", "gzip");
+    return httpd_resp_send(req, reinterpret_cast<const char *>(INDEX_HTML_GZ), INDEX_HTML_GZ_LEN);
+}
+
+void build_status_json(JsonDocument &doc) {
+    doc["ok"] = true;
+    JsonObject data = doc["data"].to<JsonObject>();
+    data["wifi_connected"] = (g_wifi_state == WiFiState::CONNECTED);
+    data["wifi_ssid"] = (g_wifi_state == WiFiState::CONNECTED) ? WiFi.SSID() : "";
+    data["wifi_rssi"] = g_wifi_rssi;
+    data["link"] = (g_wifi_state == WiFiState::CONNECTED) ? "wifi" : "none";
+    data["ip"] = (g_wifi_state == WiFiState::CONNECTED) ? WiFi.localIP().toString() : "";
+    data["network_mode"] = "wifi";
+    data["restarting"] = g_restarting;
+    data["wps"] = "";
+
+    JsonObject setup = data["setup"].to<JsonObject>();
+    setup["active"] = g_softap_enabled;
+    setup["ssid"] = g_softap_ssid;
+    setup["password"] = SOFTAP_PASSWORD;
+    setup["ip"] = SOFTAP_IP_STR;
+
+    JsonArray profiles = data["profiles"].to<JsonArray>();
+    for (uint8_t i = 0; i < g_config.wifi_profile_count; ++i) {
+        JsonObject p = profiles.add<JsonObject>();
+        p["ssid"] = g_config.wifi_profiles[i].ssid;
+        bool is_conn = (g_wifi_state == WiFiState::CONNECTED && strcmp(g_config.wifi_profiles[i].ssid, WiFi.SSID().c_str()) == 0);
+        p["connected"] = is_conn;
+        if (is_conn) {
+            p["rssi"] = g_wifi_rssi;
+        }
+    }
+
+    JsonObject cfg = data["config"].to<JsonObject>();
+    cfg["wifi_enabled"] = true;
+    cfg["api_url"] = g_config.server.http_api_base_url;
+    cfg["account"] = g_config.server.account;
+    cfg["device_password"] = g_config.server.device_auth_password;
+    cfg["callsign"] = g_config.server.callsign;
+    cfg["node_ssid"] = g_config.server.node_ssid;
+    cfg["dmr_id"] = g_config.server.dmr_id;
+
+    JsonObject mem = data["memory"].to<JsonObject>();
+    JsonObject mem_int = mem["internal"].to<JsonObject>();
+    mem_int["free"] = heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    mem_int["minimum"] = heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    mem_int["largest"] = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+
+    data["uptime_s"] = millis() / 1000;
+}
+
+esp_err_t api_status_handler(httpd_req_t *req) {
+    JsonDocument doc;
+    build_status_json(doc);
+    return send_json(req, doc);
+}
+
+esp_err_t api_scan_handler(httpd_req_t *req) {
+    // Active scan
+    int n = WiFi.scanNetworks(false, true);
+    JsonDocument doc;
+    doc["ok"] = true;
+    JsonArray items = doc["data"].to<JsonArray>();
+    if (n > 0) {
+        for (int i = 0; i < n; ++i) {
+            JsonObject item = items.add<JsonObject>();
+            item["ssid"] = WiFi.SSID(i);
+            item["rssi"] = WiFi.RSSI(i);
+            item["secure"] = (WiFi.encryptionType(i) != WIFI_AUTH_OPEN);
+        }
+    }
+    WiFi.scanDelete();
+    return send_json(req, doc);
+}
+
+esp_err_t api_add_profile_handler(httpd_req_t *req) {
+    esp_err_t err;
+    String body = get_request_body(req, err);
+    if (err != ESP_OK) return send_error(req, "Invalid request body");
+
+    JsonDocument doc;
+    DeserializationError parse_err = deserializeJson(doc, body);
+    if (parse_err) return send_error(req, "Malformed JSON");
+
+    const char *ssid = doc["ssid"] | "";
+    const char *pwd = doc["password"] | "";
+    if (ssid[0] == '\0') return send_error(req, "SSID cannot be empty");
+
+    if (!device_config::add_wifi_profile(g_config, ssid, pwd)) {
+        return send_error(req, "Failed to save profile");
+    }
+
+    // Attempt connecting to the newly added profile (index 0)
+    begin_wifi_connect_attempt(0);
+
+    JsonDocument reply;
+    build_status_json(reply);
+    return send_json(req, reply);
+}
+
+bool parse_profile_index(const char *uri, size_t &idx, const char *&action) {
+    const char *prefix = "/api/profiles/";
+    size_t prefix_len = strlen(prefix);
+    if (strncmp(uri, prefix, prefix_len) != 0) return false;
+    const char *p = uri + prefix_len;
+    if (!*p) return false;
+    char *end = nullptr;
+    long val = strtol(p, &end, 10);
+    if (val < 0 || val >= 100) return false;
+    idx = static_cast<size_t>(val);
+    action = (end && *end == '/') ? (end + 1) : "";
     return true;
 }
 
-bool parse_ipv4_text(const char *value, IPAddress &out_ip) {
-    if (!value || value[0] == '\0') return false;
-    return out_ip.fromString(value);
+esp_err_t api_profile_ops_handler(httpd_req_t *req) {
+    size_t index = 0;
+    const char *action = "";
+    if (!parse_profile_index(req->uri, index, action)) {
+        return send_error(req, "Invalid profile index");
+    }
+
+    if (req->method == HTTP_DELETE) {
+        if (!device_config::delete_wifi_profile(g_config, index)) {
+            return send_error(req, "Failed to delete profile");
+        }
+        JsonDocument reply;
+        build_status_json(reply);
+        return send_json(req, reply);
+    }
+
+    if (strcmp(action, "connect") == 0) {
+        if (index >= g_config.wifi_profile_count) {
+            return send_error(req, "Profile index out of range");
+        }
+        begin_wifi_connect_attempt(index);
+        JsonDocument reply;
+        build_status_json(reply);
+        return send_json(req, reply);
+    }
+
+    if (strcmp(action, "move") == 0) {
+        esp_err_t err;
+        String body = get_request_body(req, err);
+        if (err != ESP_OK) return send_error(req, "Invalid request body");
+        JsonDocument doc;
+        if (deserializeJson(doc, body)) return send_error(req, "Malformed JSON");
+        int direction = doc["direction"] | 0;
+        if (!device_config::move_wifi_profile(g_config, index, direction)) {
+            return send_error(req, "Failed to move profile");
+        }
+        JsonDocument reply;
+        build_status_json(reply);
+        return send_json(req, reply);
+    }
+
+    return send_error(req, "Unknown profile operation");
 }
 
-bool apply_wifi_network_config() {
-    if (g_config.wifi.dhcp) {
-        return WiFi.config(INADDR_NONE, INADDR_NONE, INADDR_NONE);
+esp_err_t api_config_handler(httpd_req_t *req) {
+    esp_err_t err;
+    String body = get_request_body(req, err);
+    if (err != ESP_OK) return send_error(req, "Invalid request body");
+
+    JsonDocument doc;
+    if (deserializeJson(doc, body)) return send_error(req, "Malformed JSON");
+
+    if (doc["api_url"].is<const char*>()) {
+        const char *val = doc["api_url"];
+        if (val) {
+            strncpy(g_config.server.http_api_base_url, val, sizeof(g_config.server.http_api_base_url) - 1);
+            g_config.server.http_api_base_url[sizeof(g_config.server.http_api_base_url) - 1] = '\0';
+        }
     }
-    IPAddress local_ip, gateway, subnet, dns1, dns2;
-    if (!parse_ipv4_text(g_config.wifi.ip, local_ip) ||
-        !parse_ipv4_text(g_config.wifi.gateway, gateway) ||
-        !parse_ipv4_text(g_config.wifi.subnet, subnet)) {
-        return false;
+    if (doc["account"].is<const char*>()) {
+        const char *val = doc["account"];
+        if (val) {
+            strncpy(g_config.server.account, val, sizeof(g_config.server.account) - 1);
+            g_config.server.account[sizeof(g_config.server.account) - 1] = '\0';
+        }
     }
-    const bool has_dns1 = parse_ipv4_text(g_config.wifi.dns1, dns1);
-    const bool has_dns2 = parse_ipv4_text(g_config.wifi.dns2, dns2);
-    if (has_dns1 && has_dns2) return WiFi.config(local_ip, gateway, subnet, dns1, dns2);
-    if (has_dns1) return WiFi.config(local_ip, gateway, subnet, dns1);
-    return WiFi.config(local_ip, gateway, subnet);
+    if (doc["device_password"].is<const char*>()) {
+        const char *val = doc["device_password"];
+        if (val) {
+            strncpy(g_config.server.device_auth_password, val, sizeof(g_config.server.device_auth_password) - 1);
+            g_config.server.device_auth_password[sizeof(g_config.server.device_auth_password) - 1] = '\0';
+        }
+    }
+    if (doc["callsign"].is<const char*>()) {
+        const char *val = doc["callsign"];
+        if (val) {
+            strncpy(g_config.server.callsign, val, sizeof(g_config.server.callsign) - 1);
+            g_config.server.callsign[sizeof(g_config.server.callsign) - 1] = '\0';
+        }
+    }
+    if (doc["node_ssid"].is<int>()) {
+        g_config.server.node_ssid = static_cast<uint8_t>(doc["node_ssid"].as<int>());
+    }
+    if (doc["dmr_id"].is<uint32_t>()) {
+        g_config.server.dmr_id = doc["dmr_id"].as<uint32_t>();
+    }
+
+    if (!device_config::save_server(g_config.server)) {
+        return send_error(req, "Failed to save configuration");
+    }
+
+    net_audio_link_reload_server_config();
+
+    JsonDocument reply;
+    build_status_json(reply);
+    return send_json(req, reply);
+}
+
+esp_err_t api_setup_stop_handler(httpd_req_t *req) {
+    stop_softap_internal();
+    JsonDocument reply;
+    build_status_json(reply);
+    return send_json(req, reply);
+}
+
+esp_err_t api_factory_reset_handler(httpd_req_t *req) {
+    device_config::factory_reset();
+    g_restarting = true;
+    g_restart_at_ms = millis() + 500;
+    JsonDocument reply;
+    reply["ok"] = true;
+    return send_json(req, reply);
+}
+
+esp_err_t api_reboot_handler(httpd_req_t *req) {
+    g_restarting = true;
+    g_restart_at_ms = millis() + 500;
+    JsonDocument reply;
+    reply["ok"] = true;
+    return send_json(req, reply);
+}
+
+// HTTP Server Lifecycle
+void start_http_server() {
+    if (g_http_server) return;
+
+    httpd_config_t config = HTTPD_DEFAULT_CONFIG();
+    config.max_uri_handlers = 20;
+    config.stack_size = 8192;
+    config.uri_match_fn = httpd_uri_match_wildcard;
+
+    if (httpd_start(&g_http_server, &config) != ESP_OK) {
+        Serial.println("[HTTPD] Failed to start httpd server");
+        return;
+    }
+
+    httpd_uri_t root_uri{.uri = "/", .method = HTTP_GET, .handler = root_get_handler, .user_ctx = nullptr};
+    httpd_uri_t gen204_uri{.uri = "/generate_204", .method = HTTP_GET, .handler = root_get_handler, .user_ctx = nullptr};
+    httpd_uri_t hotspot_uri{.uri = "/hotspot-detect.html", .method = HTTP_GET, .handler = root_get_handler, .user_ctx = nullptr};
+    httpd_uri_t test_uri{.uri = "/connecttest.txt", .method = HTTP_GET, .handler = root_get_handler, .user_ctx = nullptr};
+    httpd_uri_t ncsi_uri{.uri = "/ncsi.txt", .method = HTTP_GET, .handler = root_get_handler, .user_ctx = nullptr};
+
+    httpd_uri_t status_uri{.uri = "/api/status", .method = HTTP_GET, .handler = api_status_handler, .user_ctx = nullptr};
+    httpd_uri_t scan_uri{.uri = "/api/scan", .method = HTTP_GET, .handler = api_scan_handler, .user_ctx = nullptr};
+    httpd_uri_t add_prof_uri{.uri = "/api/profiles", .method = HTTP_POST, .handler = api_add_profile_handler, .user_ctx = nullptr};
+    httpd_uri_t ops_prof_del{.uri = "/api/profiles/*", .method = HTTP_DELETE, .handler = api_profile_ops_handler, .user_ctx = nullptr};
+    httpd_uri_t ops_prof_post{.uri = "/api/profiles/*", .method = HTTP_POST, .handler = api_profile_ops_handler, .user_ctx = nullptr};
+    httpd_uri_t config_uri{.uri = "/api/config", .method = HTTP_POST, .handler = api_config_handler, .user_ctx = nullptr};
+    httpd_uri_t stop_setup_uri{.uri = "/api/setup/stop", .method = HTTP_POST, .handler = api_setup_stop_handler, .user_ctx = nullptr};
+    httpd_uri_t reset_uri{.uri = "/api/factory-reset", .method = HTTP_POST, .handler = api_factory_reset_handler, .user_ctx = nullptr};
+    httpd_uri_t reboot_uri{.uri = "/api/reboot", .method = HTTP_POST, .handler = api_reboot_handler, .user_ctx = nullptr};
+
+    httpd_register_uri_handler(g_http_server, &root_uri);
+    httpd_register_uri_handler(g_http_server, &gen204_uri);
+    httpd_register_uri_handler(g_http_server, &hotspot_uri);
+    httpd_register_uri_handler(g_http_server, &test_uri);
+    httpd_register_uri_handler(g_http_server, &ncsi_uri);
+
+    httpd_register_uri_handler(g_http_server, &status_uri);
+    httpd_register_uri_handler(g_http_server, &scan_uri);
+    httpd_register_uri_handler(g_http_server, &add_prof_uri);
+    httpd_register_uri_handler(g_http_server, &ops_prof_del);
+    httpd_register_uri_handler(g_http_server, &ops_prof_post);
+    httpd_register_uri_handler(g_http_server, &config_uri);
+    httpd_register_uri_handler(g_http_server, &stop_setup_uri);
+    httpd_register_uri_handler(g_http_server, &reset_uri);
+    httpd_register_uri_handler(g_http_server, &reboot_uri);
+
+    Serial.println("[HTTPD] Started web provisioning server on port 80.");
+}
+
+void stop_http_server() {
+    if (g_http_server) {
+        httpd_stop(g_http_server);
+        g_http_server = nullptr;
+        Serial.println("[HTTPD] Stopped server.");
+    }
+}
+
+void start_softap_internal(bool manual, bool show_popup) {
+    configure_softap_credentials();
+    if (g_softap_enabled) {
+        if (show_popup) show_setup_popup();
+        return;
+    }
+
+    WiFi.mode(WIFI_AP_STA);
+    IPAddress ap_ip(192, 168, 4, 1);
+    IPAddress ap_gw(192, 168, 4, 1);
+    IPAddress ap_mask(255, 255, 255, 0);
+    WiFi.softAPConfig(ap_ip, ap_gw, ap_mask);
+    WiFi.softAP(g_softap_ssid, SOFTAP_PASSWORD, 1, 0, 4);
+
+    g_dns_server.stop();
+    g_dns_server.start(DNS_PORT, "*", ap_ip);
+
+    start_http_server();
+
+    g_softap_enabled = true;
+    g_softap_manual = manual;
+    g_softap_stop_at_ms = 0;
+
+    Serial.printf("[SoftAP] Started SSID=%s PWD=%s IP=%s\n", g_softap_ssid, SOFTAP_PASSWORD, SOFTAP_IP_STR);
+
+    if (show_popup) {
+        show_setup_popup();
+    }
+}
+
+void stop_softap_internal() {
+    if (!g_softap_enabled) return;
+
+    hide_setup_popup();
+    stop_http_server();
+    g_dns_server.stop();
+    WiFi.softAPdisconnect(true);
+    WiFi.mode(WIFI_STA);
+
+    // Keep Wi-Fi full speed, modem sleep disabled
+    WiFi.setSleep(false);
+    esp_wifi_set_ps(WIFI_PS_NONE);
+
+    g_softap_enabled = false;
+    g_softap_manual = false;
+    g_softap_stop_at_ms = 0;
+
+    Serial.println("[SoftAP] Stopped.");
 }
 
 void schedule_wifi_retry(uint32_t delay_ms) {
+    g_wifi_attempt_active = false;
     g_wifi_next_retry_at_ms = millis() + delay_ms;
 }
 
-// 提前声明部分内部函数，确保主循环内可顺利调用
-void begin_wifi_connect_attempt(bool reset_failures);
-void start_ble_advertising();
-void process_rpc_request(const String &json_text);
-void enable_ble(const char *reason, bool show_popup);
-void disable_ble();
-void maybe_start_ble_for_boot_failure(const char *reason);
-void handle_wifi_attempt_failure(const char *reason);
-void on_wifi_event(arduino_event_id_t event);
-void suspend_wifi_retry_for_ble_provisioning();
-
-void begin_wifi_connect_attempt(bool reset_failures) {
-    if (!g_main_screen_ready) return;
-
-    if (!device_config::has_wifi_credentials(g_config.wifi)) {
+void begin_wifi_connect_attempt(size_t profile_index) {
+    if (g_config.wifi_profile_count == 0) {
         g_wifi_state = WiFiState::NO_CONFIG;
         g_wifi_attempt_active = false;
-        notify_status();
+        refresh_status_icons();
         return;
     }
 
-    if (reset_failures) {
-        g_wifi_boot_failures = 0;
-        g_wifi_retry_suspended = false;
-    } else if (g_wifi_retry_suspended) {
-        // BLE provisioning fallback is active, suppress background Wi-Fi churn.
+    if (profile_index >= g_config.wifi_profile_count) {
+        profile_index = 0;
+    }
+    g_wifi_active_profile_index = profile_index;
+
+    const auto &profile = g_config.wifi_profiles[profile_index];
+    if (profile.ssid[0] == '\0') {
+        g_wifi_state = WiFiState::NO_CONFIG;
+        g_wifi_attempt_active = false;
+        refresh_status_icons();
         return;
     }
 
-    if (!apply_wifi_network_config()) {
-        g_wifi_state = WiFiState::FAILED;
-        notify_status();
-        return;
-    }
+    Serial.printf("[WIFI] Connecting to '%s' (profile %u/%u)...\n",
+                  profile.ssid, static_cast<unsigned>(profile_index + 1),
+                  static_cast<unsigned>(g_config.wifi_profile_count));
 
-    WiFi.begin(g_config.wifi.ssid, g_config.wifi.password);
     g_wifi_state = WiFiState::CONNECTING;
     g_wifi_attempt_active = true;
     g_wifi_attempt_started_at_ms = millis();
     g_wifi_next_retry_at_ms = 0;
-    notify_status();
-    Serial.printf("[WIFI] Connecting to %s\n", g_config.wifi.ssid);
+    refresh_status_icons();
+
+    // Ensure sleep is disabled
+    WiFi.setSleep(false);
+    esp_wifi_set_ps(WIFI_PS_NONE);
+
+    WiFi.disconnect(false, false);
+    WiFi.begin(profile.ssid, profile.password);
 }
 
-void generate_auth_code() {
-    const uint32_t value = static_cast<uint32_t>(esp_random()) % 1000000UL;
-    snprintf(g_ble_auth_code, sizeof(g_ble_auth_code), "%06lu", static_cast<unsigned long>(value));
-}
-
-void build_ble_device_name() {
-    const uint64_t chip_id = ESP.getEfuseMac();
-    snprintf(g_ble_device_name,
-             sizeof(g_ble_device_name),
-             "DraARL-%06llX",
-             static_cast<unsigned long long>(chip_id & 0xFFFFFFULL));
-}
-
-void start_ble_advertising() {
-    if (!g_ble_advertising) return;
-    g_ble_advertising->stop();
-    g_ble_advertising->setScanResponse(true);
-    g_ble_advertising->setMinPreferred(0x06);
-    g_ble_advertising->setMinPreferred(0x12);
-    g_ble_advertising->start();
-}
-
-// -----------------------------------------------------
-// 异步事件回调：只负责更改全局标志位，绝不直接操作UI
-// -----------------------------------------------------
-class ProvisioningServerCallbacks final : public BLEServerCallbacks {
-public:
-    void onConnect(BLEServer *server, ble_gap_conn_desc *desc) override {
-        (void)server;
-        g_ble_conn_id = desc ? desc->conn_handle : 0;
-        g_evt_ble_connected = true; // 发送事件标志给主线程
-    }
-
-    void onDisconnect(BLEServer *server) override {
-        (void)server;
-        g_evt_ble_disconnected = true; // 发送事件标志给主线程
-    }
-};
-
-class AuthCharacteristicCallbacks final : public BLECharacteristicCallbacks {
-public:
-    void onWrite(BLECharacteristic *characteristic) override {
-        if (!characteristic) return;
-
-        // Receiving writes proves an active link, even if connect event was delayed.
-        g_ble_transport_connected = true;
-
-        const std::string value = characteristic->getValue();
-        String code(value.c_str());
-        code.trim();
-
-        if (code.equals(g_ble_auth_code)) {
-            characteristic->setValue("OK");
-            g_evt_ble_auth_failed = false;
-            g_evt_ble_auth_success = true; // 密码正确，交由主线程处理
-        } else {
-            characteristic->setValue("ERR");
-            g_evt_ble_auth_success = false;
-            g_evt_ble_auth_failed = true; // 密码错误，交由主线程处理
-        }
-    }
-};
-
-class RpcTxCharacteristicCallbacks final : public BLECharacteristicCallbacks {
-public:
-    void onWrite(BLECharacteristic *characteristic) override {
-        if (!characteristic) return;
-        const std::string value = characteristic->getValue();
-        if (value.empty()) return;
-        std::lock_guard<std::mutex> lock(g_ble_rpc_mutex);
-        if (g_evt_rpc_ready) return; // Never overwrite an unconsumed complete request.
-        const uint8_t flags = static_cast<uint8_t>(value[0]);
-        if (value.size() > BLE_RPC_CHUNK_PAYLOAD + 1 || (flags & ~0x03) != 0) {
-            g_ble_rpc_rx_buffer = "";
-            g_ble_rpc_started = false;
-            return;
-        }
-        if (flags & BLE_CHUNK_FLAG_START) {
-            g_ble_rpc_rx_buffer = "";
-            g_ble_rpc_started = true;
-        }
-        if (!g_ble_rpc_started) return;
-        if (g_ble_rpc_rx_buffer.length() + value.size() - 1 > 4096) {
-            g_ble_rpc_rx_buffer = "";
-            g_ble_rpc_started = false;
-            return;
-        }
-        for (size_t i = 1; i < value.size(); ++i) g_ble_rpc_rx_buffer += value[i];
-        if (flags & BLE_CHUNK_FLAG_END) {
-            g_ble_rpc_pending = g_ble_rpc_rx_buffer;
-            g_ble_rpc_rx_buffer = "";
-            g_ble_rpc_started = false;
-            g_evt_rpc_ready = true;
-        }
-    }
-};
-
-void reset_ble_rpc() {
-    std::lock_guard<std::mutex> lock(g_ble_rpc_mutex);
-    g_ble_rpc_rx_buffer = "";
-    g_ble_rpc_pending = "";
-    g_ble_rpc_started = false;
-    g_evt_rpc_ready = false;
-}
-
-// -----------------------------------------------------
-// 以下为业务处理函数，在主线程环境下运行是完全安全的
-// -----------------------------------------------------
-void add_config_to_response(JsonObject root) {
-    const bool has_radio = edit_controller_get_device_model() == 1;
-    root["dev_model"] = has_radio ? 1 : 2;
-    JsonObject wifi = root["wifi"].to<JsonObject>();
-    wifi["ssid"] = g_config.wifi.ssid;
-    wifi["password"] = g_config.wifi.password;
-    wifi["dhcp"] = g_config.wifi.dhcp;
-    wifi["ip"] = g_config.wifi.ip;
-    wifi["gateway"] = g_config.wifi.gateway;
-    wifi["subnet"] = g_config.wifi.subnet;
-    wifi["dns1"] = g_config.wifi.dns1;
-    wifi["dns2"] = g_config.wifi.dns2;
-
-    device_config::RadioConfig radio_config = {};
-    edit_controller_get_radio_config(radio_config);
-
-    char tx_freq[16] = {0};
-    char rx_freq[16] = {0};
-    format_frequency_mhz(radio_config.tx_frequency_x10000, tx_freq, sizeof(tx_freq));
-    format_frequency_mhz(radio_config.rx_frequency_x10000, rx_freq, sizeof(rx_freq));
-
-    JsonObject radio = root["radio"].to<JsonObject>();
-    if (has_radio) {
-    radio["tx_frequency_mhz"] = tx_freq;
-    radio["rx_frequency_mhz"] = rx_freq;
-    radio["tx_tone_type"] = subaudio_type_to_string(radio_config.tx_subaudio.type);
-    radio["tx_tone_index"] = radio_config.tx_subaudio.index;
-    radio["rx_tone_type"] = subaudio_type_to_string(radio_config.rx_subaudio.type);
-    radio["rx_tone_index"] = radio_config.rx_subaudio.index;
-    radio["squelch"] = radio_config.squelch;
-    radio["wide_band"] = radio_config.wide_band;
-    radio["power_high"] = radio_config.power_high;
-    radio["power_level"] = radio_config.power_high ? 3 : 1;
-    }
-    radio["adc_gain_db"] = radio_config.adc_gain_db;
-    radio["adc_volume"] = radio_config.adc_volume;
-    radio["dac_volume"] = radio_config.dac_volume;
-    if (!has_radio) {
-        radio["sql_active_high"] = radio_config.sql_active_high;
-        radio["ptt_active_high"] = radio_config.ptt_active_high;
-    }
-
-    JsonObject server = root["server"].to<JsonObject>();
-    server["callsign"] = g_config.server.callsign;
-    server["node_ssid"] = g_config.server.node_ssid;
-    server["dmr_id"] = g_config.server.dmr_id;
-    server["http_api_base_url"] = g_config.server.http_api_base_url;
-    server["account"] = g_config.server.account;
-    server["device_auth_password"] = g_config.server.device_auth_password;
-
-    // 只读：UDP 入口由本站 HTTP API 下发，不接受写入。
-    access_point::Endpoint endpoint = {};
-    JsonObject active = server["access_point"].to<JsonObject>();
-    if (net_audio_link_get_access_point(endpoint)) {
-        active["id"] = endpoint.id;
-        active["udp_host"] = endpoint.host;
-        active["udp_port"] = endpoint.port;
-        if (endpoint.rtt_ms != access_point::RTT_UNKNOWN) {
-            active["rtt_ms"] = endpoint.rtt_ms;
-        }
-    }
-}
-
-bool parse_wifi_config(JsonObjectConst input, device_config::WiFiConfig &config, String &error) {
-    device_config::set_defaults(config);
-    copy_cstr(config.ssid, input["ssid"] | "");
-    copy_cstr(config.password, input["password"] | "");
-    config.dhcp = input["dhcp"] | true;
-    copy_cstr(config.ip, input["ip"] | "");
-    copy_cstr(config.gateway, input["gateway"] | "");
-    copy_cstr(config.subnet, input["subnet"] | "");
-    copy_cstr(config.dns1, input["dns1"] | "");
-    copy_cstr(config.dns2, input["dns2"] | "");
-
-    if (config.ssid[0] == '\0') {
-        error = "WiFi SSID required";
-        return false;
-    }
-    if (!config.dhcp) {
-        IPAddress test_ip;
-        if (!parse_ipv4_text(config.ip, test_ip) ||
-            !parse_ipv4_text(config.gateway, test_ip) ||
-            !parse_ipv4_text(config.subnet, test_ip)) {
-            error = "Static IP fields invalid";
-            return false;
-        }
-    }
-    return true;
-}
-
-bool parse_radio_config(JsonObjectConst input, device_config::RadioConfig &config, String &error) {
-    // BLE writes can update audio only; preserve untouched RF settings.
-    edit_controller_get_radio_config(config);
-    const bool has_radio = edit_controller_get_device_model() == 1;
-    if (has_radio) {
-        if ((!input["tx_frequency_mhz"].isNull() && !parse_frequency_value(input["tx_frequency_mhz"], config.tx_frequency_x10000)) ||
-            (!input["rx_frequency_mhz"].isNull() && !parse_frequency_value(input["rx_frequency_mhz"], config.rx_frequency_x10000))) {
-            error = "Radio frequency invalid";
-            return false;
-        }
-        if (!input["tx_tone_type"].isNull()) config.tx_subaudio.type = subaudio_type_from_string(String(input["tx_tone_type"] | "OFF"));
-        config.tx_subaudio.index = input["tx_tone_index"] | config.tx_subaudio.index;
-        if (!input["rx_tone_type"].isNull()) config.rx_subaudio.type = subaudio_type_from_string(String(input["rx_tone_type"] | "OFF"));
-        config.rx_subaudio.index = input["rx_tone_index"] | config.rx_subaudio.index;
-        int sql = input["squelch"] | static_cast<int>(config.squelch);
-        if (sql < 0 || sql > 8) { error = "Squelch must be 0-8"; return false; }
-        config.squelch = static_cast<uint8_t>(sql);
-        config.wide_band = input["wide_band"] | config.wide_band;
-        if (!input["power_high"].isNull()) config.power_high = input["power_high"] | config.power_high;
-        else if (!input["power_level"].isNull()) config.power_high = (input["power_level"] | 1) >= 2;
-    }
-
-    const int adc_gain_db = input["adc_gain_db"] | static_cast<int>(config.adc_gain_db);
-    const int adc_volume = input["adc_volume"] | static_cast<int>(config.adc_volume);
-    const int dac_volume = input["dac_volume"] | static_cast<int>(config.dac_volume);
-    if (adc_gain_db < 0 || adc_gain_db > device_config::ADC_GAIN_MAX_DB) {
-        error = "ADC gain must be 0-24 dB";
-        return false;
-    }
-    if (adc_volume < 0 || adc_volume > device_config::AUDIO_VOLUME_MAX ||
-        dac_volume < 0 || dac_volume > device_config::AUDIO_VOLUME_MAX) {
-        error = "ADC/DAC volume must be 0-100";
-        return false;
-    }
-    config.adc_gain_db = device_config::normalize_adc_gain_db(static_cast<uint8_t>(adc_gain_db));
-    config.adc_volume = static_cast<uint8_t>(adc_volume);
-    config.dac_volume = static_cast<uint8_t>(dac_volume);
-    if (!has_radio) {
-        config.sql_active_high = input["sql_active_high"] | config.sql_active_high;
-        config.ptt_active_high = input["ptt_active_high"] | config.ptt_active_high;
-    }
-
-    if (config.tx_frequency_x10000 < 4000000UL || config.tx_frequency_x10000 > 4700000UL ||
-        config.rx_frequency_x10000 < 4000000UL || config.rx_frequency_x10000 > 4700000UL) {
-        error = "Frequency out of range";
-        return false;
-    }
-    if (config.squelch > 8) {
-        error = "Squelch must be 0-8";
-        return false;
-    }
-
-    return true;
-}
-
-bool parse_server_config(JsonObjectConst input, device_config::ServerConfig &config, String &error) {
-    device_config::set_defaults(config);
-    copy_cstr(config.callsign, input["callsign"] | "");
-    config.node_ssid = input["node_ssid"] | 0;
-    config.dmr_id = input["dmr_id"] | 0;
-    const char *http_api_base_url = input["http_api_base_url"] | "";
-    if (http_api_base_url[0] != '\0') {
-        copy_cstr(config.http_api_base_url, http_api_base_url);
-    }
-    copy_cstr(config.account, input["account"] | "");
-    copy_cstr(config.device_auth_password, input["device_auth_password"] | "");
-
-    if (config.node_ssid != 0 && !device_config::is_valid_device_node_ssid(config.node_ssid)) {
-        error = "Node SSID must be 1-99 or 106-254";
-        return false;
-    }
-    if (config.dmr_id > 0xFFFFFFUL) {
-        error = "DMR ID must be <= 16777215";
-        return false;
-    }
-    return true;
-}
-
-void send_rpc_success(JsonVariantConst request, const std::function<void(JsonObject)> &fill_data = nullptr) {
-    JsonDocument response;
-    if (!request.isNull() && request["id"].is<int>()) {
-        response["id"] = request["id"].as<int>();
-    }
-    response["ok"] = true;
-    JsonObject data = response["data"].to<JsonObject>();
-    if (fill_data) {
-        fill_data(data);
-    }
-
-    String json;
-    serializeJson(response, json);
-    notify_rpc_json(json);
-}
-
-void cache_wifi_scan_results(int network_count) {
-    if (network_count < 0) return;
-
-    const int capped_count = std::min(network_count, static_cast<int>(WIFI_SCAN_CACHE_MAX));
-    g_wifi_scan_cache_count = static_cast<uint8_t>(capped_count);
-
-    for (int i = 0; i < capped_count; ++i) {
-        const String ssid = WiFi.SSID(i);
-        strncpy(g_wifi_scan_cache[i].ssid, ssid.c_str(), sizeof(g_wifi_scan_cache[i].ssid) - 1);
-        g_wifi_scan_cache[i].ssid[sizeof(g_wifi_scan_cache[i].ssid) - 1] = '\0';
-        g_wifi_scan_cache[i].rssi = WiFi.RSSI(i);
-        g_wifi_scan_cache[i].auth = static_cast<int32_t>(WiFi.encryptionType(i));
-    }
-
-    for (int i = capped_count; i < static_cast<int>(WIFI_SCAN_CACHE_MAX); ++i) {
-        g_wifi_scan_cache[i].ssid[0] = '\0';
-        g_wifi_scan_cache[i].rssi = 0;
-        g_wifi_scan_cache[i].auth = 0;
-    }
-
-    g_wifi_scan_cache_updated_at_ms = millis();
-}
-
-void append_cached_wifi_scan_results(JsonArray items) {
-    for (uint8_t i = 0; i < g_wifi_scan_cache_count; ++i) {
-        if (g_wifi_scan_cache[i].ssid[0] == '\0') continue;
-        JsonObject item = items.add<JsonObject>();
-        item["ssid"] = g_wifi_scan_cache[i].ssid;
-        item["rssi"] = g_wifi_scan_cache[i].rssi;
-        item["auth"] = g_wifi_scan_cache[i].auth;
-    }
-}
-
-void scan_wifi_networks(JsonVariantConst request) {
-    bool partial = false;
-    bool timed_out = false;
-    bool scan_in_progress = false;
-    bool used_cache = false;
-    bool fresh = false;
-
-    int scan_count = -1;
-    if (!g_wifi_scan_in_progress) {
-        const int start_result = WiFi.scanNetworks(true, true);
-        if (start_result >= 0) {
-            scan_count = start_result;
-        } else if (start_result == WIFI_SCAN_STATUS_RUNNING) {
-            g_wifi_scan_in_progress = true;
-        } else {
-            partial = true;
-            used_cache = true;
-        }
-    }
-
-    const uint32_t wait_started_at_ms = millis();
-    while (scan_count < 0 && g_wifi_scan_in_progress) {
-        const int status = WiFi.scanComplete();
-        if (status >= 0) {
-            scan_count = status;
-            g_wifi_scan_in_progress = false;
-            break;
-        }
-
-        if (status == WIFI_SCAN_STATUS_FAILED) {
-            g_wifi_scan_in_progress = false;
-            break;
-        }
-
-        if ((millis() - wait_started_at_ms) >= WIFI_SCAN_WAIT_BUDGET_MS) {
-            timed_out = true;
-            scan_in_progress = true;
-            break;
-        }
-
-        delay(WIFI_SCAN_POLL_INTERVAL_MS);
-    }
-
-    if (scan_count >= 0) {
-        cache_wifi_scan_results(scan_count);
-        WiFi.scanDelete();
-        fresh = true;
-        partial = false;
-    } else {
-        partial = true;
-        used_cache = true;
-    }
-
-    const int32_t cache_age_ms = (g_wifi_scan_cache_updated_at_ms == 0)
-        ? -1
-        : static_cast<int32_t>(millis() - g_wifi_scan_cache_updated_at_ms);
-
-    send_rpc_success(request, [partial, timed_out, scan_in_progress, used_cache, fresh, scan_count, cache_age_ms](JsonObject data) {
-        data["partial"] = partial;
-        data["timed_out"] = timed_out;
-        data["scan_in_progress"] = scan_in_progress;
-        data["used_cache"] = used_cache;
-        data["fresh"] = fresh;
-        data["total"] = scan_count >= 0 ? scan_count : static_cast<int>(g_wifi_scan_cache_count);
-        data["cache_age_ms"] = cache_age_ms;
-        JsonArray items = data["networks"].to<JsonArray>();
-        append_cached_wifi_scan_results(items);
-    });
-}
-
-void disconnect_ble_client() {
-    if (g_ble_server && g_ble_transport_connected) {
-        g_ble_server->disconnect(g_ble_conn_id);
-    }
-}
-
-void process_rpc_request(const String &json_text) {
-    JsonDocument request;
-    const DeserializationError parse_result = deserializeJson(request, json_text);
-    if (parse_result) {
-        send_rpc_error(JsonVariantConst(), "Invalid JSON");
-        return;
-    }
-
-    JsonVariantConst request_variant = request.as<JsonVariantConst>();
-    const char *cmd = request["cmd"] | "";
-    if (cmd[0] == '\0') {
-        send_rpc_error(request_variant, "Missing cmd");
-        return;
-    }
-
-    const bool auth_not_required = strcmp(cmd, "get_status") == 0;
-
-    if (!g_ble_authenticated && !auth_not_required) {
-        send_rpc_error(request_variant, "Not authenticated");
-        return;
-    }
-
-    if (strcmp(cmd, "get_status") == 0) {
-        send_rpc_success(request_variant, [](JsonObject data) {
-            data["wifi_state"] = wifi_state_label(g_wifi_state);
-            data["ble_state"] = static_cast<unsigned int>(current_ble_state());
-            data["authenticated"] = g_ble_authenticated;
-            data["rssi"] = g_wifi_rssi;
-            data["device_name"] = g_ble_device_name;
-        });
-        return;
-    }
-
-    if (strcmp(cmd, "get_config") == 0) {
-        send_rpc_success(request_variant, [](JsonObject data) {
-            add_config_to_response(data);
-        });
-        return;
-    }
-
-    if (strcmp(cmd, "scan_wifi") == 0) {
-        scan_wifi_networks(request_variant);
-        return;
-    }
-
-    if (strcmp(cmd, "set_wifi") == 0) {
-        device_config::WiFiConfig config = {};
-        String parse_error;
-        if (!parse_wifi_config(request["data"].as<JsonObjectConst>(), config, parse_error)) {
-            send_rpc_error(request_variant, parse_error.c_str());
-            return;
-        }
-
-        g_config.wifi = config;
-        if (!device_config::save_wifi(g_config.wifi)) {
-            send_rpc_error(request_variant, "Failed to save WiFi config");
-            return;
-        }
-
-        begin_wifi_connect_attempt(true);
-        send_rpc_success(request_variant, [](JsonObject data) {
-            data["wifi_state"] = wifi_state_label(g_wifi_state);
-        });
-        return;
-    }
-
-    if (strcmp(cmd, "set_radio") == 0) {
-        device_config::RadioConfig config = {};
-        String parse_error;
-        if (!parse_radio_config(request["data"].as<JsonObjectConst>(), config, parse_error)) {
-            send_rpc_error(request_variant, parse_error.c_str());
-            return;
-        }
-
-        if (!edit_controller_set_radio_config(config, true)) {
-            send_rpc_error(request_variant, "Failed to apply radio config");
-            return;
-        }
-
-        g_config.radio = config;
-        net_audio_link_schedule_radio_config_sync();
-        send_rpc_success(request_variant);
-        return;
-    }
-
-    if (strcmp(cmd, "set_server") == 0) {
-        device_config::ServerConfig config = {};
-        String parse_error;
-        if (!parse_server_config(request["data"].as<JsonObjectConst>(), config, parse_error)) {
-            send_rpc_error(request_variant, parse_error.c_str());
-            return;
-        }
-
-        g_config.server = config;
-        if (!device_config::save_server(g_config.server)) {
-            send_rpc_error(request_variant, "Failed to save server config");
-            return;
-        }
-
-        send_rpc_success(request_variant);
-        net_audio_link_reload_server_config();
-        return;
-    }
-
-    if (strcmp(cmd, "disconnect") == 0) {
-        send_rpc_success(request_variant);
-        disconnect_ble_client();
-        return;
-    }
-
-    send_rpc_error(request_variant, "Unknown cmd");
-}
-
-
-void init_ble_stack() {
-    if (g_ble_stack_initialized) return;
-
-    build_ble_device_name();
-
-    BLEDevice::init(g_ble_device_name);
-
-    g_ble_server = BLEDevice::createServer();
-    g_ble_server->setCallbacks(new ProvisioningServerCallbacks());
-
-    g_ble_service = g_ble_server->createService(BLE_SERVICE_UUID);
-
-    g_ble_status_char = g_ble_service->createCharacteristic(
-        BLE_STATUS_UUID,
-        NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::NOTIFY
-    );
-
-    g_ble_auth_char = g_ble_service->createCharacteristic(
-        BLE_AUTH_UUID,
-        NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::WRITE
-    );
-    g_ble_auth_char->setCallbacks(new AuthCharacteristicCallbacks());
-    g_ble_auth_char->setValue("READY");
-
-    g_ble_rpc_tx_char = g_ble_service->createCharacteristic(
-        BLE_RPC_TX_UUID,
-        NIMBLE_PROPERTY::WRITE
-    );
-    g_ble_rpc_tx_char->setCallbacks(new RpcTxCharacteristicCallbacks());
-
-    g_ble_rpc_rx_char = g_ble_service->createCharacteristic(
-        BLE_RPC_RX_UUID,
-        NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::NOTIFY
-    );
-
-    g_ble_service->start();
-    g_ble_advertising = BLEDevice::getAdvertising();
-    g_ble_advertising->addServiceUUID(BLE_SERVICE_UUID);
-    g_ble_stack_initialized = true;
-}
-
-void disable_ble() {
-    hide_ble_popup();
-
-    if (g_ble_server && g_ble_transport_connected) {
-        g_ble_server->disconnect(g_ble_conn_id);
-    }
-    if (g_ble_advertising) {
-        g_ble_advertising->stop();
-    }
-    g_ble_enabled = false;
-    g_ble_transport_connected = false;
-    g_ble_authenticated = false;
-    g_ble_idle_since_ms = 0;
-    reset_ble_rpc();
-    notify_status();
-    Serial.println("[BLE] Disabled.");
-}
-
-void enable_ble(const char *reason, bool show_popup) {
-    generate_auth_code();
-    init_ble_stack();
-    start_ble_advertising();
-
-    g_ble_enabled = true;
-    g_ble_transport_connected = false;
-    g_ble_authenticated = false;
-    g_ble_idle_since_ms = millis();
-    if (g_ble_auth_char) {
-        g_ble_auth_char->setValue("READY");
-    }
-    if (show_popup) {
-        show_ble_popup(reason);
-    } else {
-        hide_ble_popup();
-    }
-    notify_status();
-    Serial.printf("[BLE] Enabled with auth code %s\n", g_ble_auth_code);
-}
-
-void maybe_start_ble_for_boot_failure(const char *reason) {
-    if (device_config::has_wifi_credentials(g_config.wifi)) {
-        // Keep retrying at a lower rate while provisioning is available. The
-        // router may simply need longer than this device to finish booting.
-        g_wifi_attempt_active = false;
-        g_wifi_retry_suspended = false;
-        schedule_wifi_retry(WIFI_PROVISIONING_RETRY_DELAY_MS);
-    } else {
-        suspend_wifi_retry_for_ble_provisioning();
-    }
-
-    if (g_ble_enabled) {
-        show_ble_popup(reason);
-        notify_status();
-        return;
-    }
-    enable_ble(reason, true);
-}
-
-void suspend_wifi_retry_for_ble_provisioning() {
-    g_wifi_attempt_active = false;
-    g_wifi_next_retry_at_ms = 0;
-    g_wifi_retry_suspended = true;
-
-    if (WiFi.status() != WL_CONNECTED) {
-        g_wifi_manual_disconnect = true;
-        WiFi.disconnect(false, false);
-    }
-}
-
-
-void handle_wifi_attempt_failure(const char *reason) {
+void handle_wifi_failure(const char *reason) {
     g_wifi_attempt_active = false;
     g_wifi_state = WiFiState::FAILED;
     g_wifi_rssi = 0;
+    refresh_status_icons();
 
-    if (g_wifi_boot_popup_allowed && !g_wifi_connected_once) {
+    if (!g_wifi_connected_once) {
         if (g_wifi_boot_failures < 255) {
             ++g_wifi_boot_failures;
         }
 
-        if (g_wifi_boot_failures == WIFI_BOOT_FAILURE_LIMIT) {
-            maybe_start_ble_for_boot_failure("WiFi link failed repeatedly. BLE GATT provisioning is active.");
-            notify_status();
-            Serial.printf("[WIFI] Boot connect failed: %s; fallback retry scheduled.\n",
-                          reason ? reason : "unknown");
-            return;
-        }
-
-        if (g_wifi_boot_failures > WIFI_BOOT_FAILURE_LIMIT) {
-            schedule_wifi_retry(WIFI_PROVISIONING_RETRY_DELAY_MS);
-            notify_status();
-            Serial.printf("[WIFI] Fallback connect failure: %s; retrying in %lu ms.\n",
-                          reason ? reason : "unknown",
-                          static_cast<unsigned long>(WIFI_PROVISIONING_RETRY_DELAY_MS));
+        if (g_wifi_boot_failures >= WIFI_BOOT_FAILURE_LIMIT) {
+            Serial.printf("[WIFI] Boot failures reached limit (%u), opening SoftAP for setup: %s\n",
+                          g_wifi_boot_failures, reason ? reason : "timeout");
+            start_softap_internal(false, true);
+            schedule_wifi_retry(WIFI_BACKGROUND_RETRY_DELAY_MS);
             return;
         }
     }
 
+    // Try next saved profile if available
+    if (g_config.wifi_profile_count > 1) {
+        size_t next_idx = (g_wifi_active_profile_index + 1) % g_config.wifi_profile_count;
+        g_wifi_active_profile_index = next_idx;
+    }
+
     schedule_wifi_retry(WIFI_RETRY_DELAY_MS);
-    notify_status();
-    Serial.printf("[WIFI] Connect failure: %s\n", reason ? reason : "unknown");
+    Serial.printf("[WIFI] Connect failure: %s; retrying in %lu ms\n",
+                  reason ? reason : "unknown", static_cast<unsigned long>(WIFI_RETRY_DELAY_MS));
 }
 
 void on_wifi_event(arduino_event_id_t event) {
-    // 仅仅改变标志位，绝不直接操作带 LVGL 渲染的业务逻辑！
     switch (event) {
         case ARDUINO_EVENT_WIFI_STA_GOT_IP:
             g_evt_wifi_connected = true;
@@ -1119,6 +658,7 @@ void on_wifi_event(arduino_event_id_t event) {
             break;
     }
 }
+
 } // namespace
 
 void connectivity_manager_init() {
@@ -1128,22 +668,24 @@ void connectivity_manager_init() {
     device_config::load(g_config);
     edit_controller_get_radio_config(g_config.radio);
 
-    // Initialize BLE once before Wi-Fi starts to avoid late BT controller enable
-    // aborting in coexistence setup on ESP32-S3.
-    init_ble_stack();
+    configure_softap_credentials();
 
+    // Wi-Fi Only - No BLE initialized!
     WiFi.mode(WIFI_STA);
     WiFi.persistent(false);
     WiFi.setAutoReconnect(false);
-    // ESP32-S3 requires Wi-Fi modem sleep to stay enabled while BLE is active.
-    WiFi.setSleep(true);
+    WiFi.setSleep(false);
+    esp_wifi_set_ps(WIFI_PS_NONE);
     WiFi.onEvent(on_wifi_event);
 
-    g_wifi_state = device_config::has_wifi_credentials(g_config.wifi) ? WiFiState::FAILED : WiFiState::NO_CONFIG;
+    g_wifi_state = (g_config.wifi_profile_count > 0 && g_config.wifi_profiles[0].ssid[0] != '\0')
+                       ? WiFiState::FAILED
+                       : WiFiState::NO_CONFIG;
     g_wifi_rssi = 0;
     g_wifi_connected_once = false;
-    g_wifi_boot_popup_allowed = true;
     g_manager_initialized = true;
+
+    Serial.println("[CONNECTIVITY] Initialized with pure Wi-Fi / SoftAP (BLE disabled).");
 }
 
 void connectivity_manager_on_main_screen_enter() {
@@ -1154,188 +696,121 @@ void connectivity_manager_on_main_screen_enter() {
     g_main_screen_ready = true;
     refresh_status_icons();
 
-    if (!device_config::has_wifi_credentials(g_config.wifi)) {
-        if (g_wifi_boot_popup_allowed) {
-            maybe_start_ble_for_boot_failure("WiFi configuration missing. BLE GATT provisioning is active.");
-        }
+    if (g_config.wifi_profile_count == 0 || g_config.wifi_profiles[0].ssid[0] == '\0') {
+        Serial.println("[WIFI] No Wi-Fi credentials; starting automatic SoftAP.");
         g_wifi_state = WiFiState::NO_CONFIG;
-        notify_status();
+        start_softap_internal(false, true);
         return;
     }
 
-    begin_wifi_connect_attempt(true);
+    begin_wifi_connect_attempt(0);
 }
 
 void connectivity_manager_update() {
     if (!g_manager_initialized) return;
 
-    // ===============================================
-    // 处理所有后台触发的异步事件（100% 在主线程下进行）
-    // ===============================================
+    const uint32_t now_ms = millis();
 
-    // 处理 WiFi 连接成功
+    // Restart timer
+    if (g_restarting && now_ms >= g_restart_at_ms) {
+        Serial.println("[SYSTEM] Rebooting now...");
+        ESP.restart();
+    }
+
+    // DNS requests processing for captive portal
+    if (g_softap_enabled) {
+        g_dns_server.processNextRequest();
+    }
+
+    // Event: Wi-Fi STA Connected
     if (g_evt_wifi_connected) {
         g_evt_wifi_connected = false;
         g_wifi_attempt_active = false;
         g_wifi_next_retry_at_ms = 0;
-        g_wifi_retry_suspended = false;
         g_wifi_state = WiFiState::CONNECTED;
         g_wifi_connected_once = true;
-        g_wifi_boot_popup_allowed = false;
         g_wifi_boot_failures = 0;
         g_wifi_rssi = WiFi.RSSI();
-        if (g_ble_enabled) {
-            disable_ble();
+
+        // Enforce Wi-Fi full speed / no power save
+        WiFi.setSleep(false);
+        esp_wifi_set_ps(WIFI_PS_NONE);
+
+        refresh_status_icons();
+        Serial.printf("[WIFI] Connected. IP=%s RSSI=%d\n", WiFi.localIP().toString().c_str(), g_wifi_rssi);
+
+        // If SoftAP was opened automatically, schedule closure after 10s so phone receives response
+        if (g_softap_enabled && !g_softap_manual) {
+            g_softap_stop_at_ms = now_ms + SETUP_AUTO_CLOSE_DELAY_MS;
+            Serial.println("[SoftAP] Wi-Fi connected; auto SoftAP will close in 10 seconds.");
         }
-        notify_status();
-        Serial.printf("[WIFI] Connected. IP=%s\n", WiFi.localIP().toString().c_str());
     }
 
-    // 处理 WiFi 断开事件
+    // Event: Wi-Fi STA Disconnected
     if (g_evt_wifi_disconnected) {
         g_evt_wifi_disconnected = false;
         g_wifi_rssi = 0;
+        refresh_status_icons();
+
         if (g_wifi_manual_disconnect) {
             g_wifi_manual_disconnect = false;
-            notify_status();
-        } else if (g_wifi_retry_suspended) {
-            notify_status();
-        } else if (!g_wifi_attempt_active &&
-                   g_wifi_state != WiFiState::CONNECTING &&
-                   g_wifi_state != WiFiState::CONNECTED) {
-            // Ignore unrelated/disordered disconnect events while not attempting a link.
-            notify_status();
-        } else {
-            handle_wifi_attempt_failure("station disconnected");
+        } else if (g_wifi_attempt_active || g_wifi_state == WiFiState::CONNECTED) {
+            handle_wifi_failure("station disconnected");
         }
     }
 
-    // 处理 BLE 客户端连接
-    if (g_evt_ble_connected) {
-        g_evt_ble_connected = false;
-        g_ble_transport_connected = true;
-        g_ble_authenticated = false;
-        g_ble_idle_since_ms = millis();
-        notify_status();
-        Serial.println("[BLE] Client connected.");
+    // Auto-close SoftAP after timer expires
+    if (g_softap_enabled && !g_softap_manual && g_softap_stop_at_ms != 0 && now_ms >= g_softap_stop_at_ms) {
+        stop_softap_internal();
     }
 
-    // 处理 BLE 客户端断开
-    if (g_evt_ble_disconnected) {
-        g_evt_ble_disconnected = false;
-        reset_ble_rpc();
-        g_ble_transport_connected = false;
-        g_ble_authenticated = false;
-        g_ble_idle_since_ms = millis();
-        notify_status();
-        if (g_ble_enabled) {
-            start_ble_advertising();
-        }
-        Serial.println("[BLE] Client disconnected.");
+    // Wi-Fi Connection Timeout & Retry Scheduler
+    if (g_wifi_attempt_active && (now_ms - g_wifi_attempt_started_at_ms) >= WIFI_CONNECT_TIMEOUT_MS) {
+        handle_wifi_failure("connection timeout");
+    } else if (!g_wifi_attempt_active && g_wifi_next_retry_at_ms != 0 && now_ms >= g_wifi_next_retry_at_ms) {
+        begin_wifi_connect_attempt(g_wifi_active_profile_index);
     }
 
-    // 处理 BLE 配对码校验通过
-    if (g_evt_ble_auth_success) {
-        g_evt_ble_auth_success = false;
-        g_ble_authenticated = true;
-        g_ble_idle_since_ms = millis();
-        hide_ble_popup();
-        notify_status();
-        Serial.println("[BLE] Dynamic code authenticated.");
-    }
-
-    // 处理 BLE 配对码校验失败
-    if (g_evt_ble_auth_failed) {
-        g_evt_ble_auth_failed = false;
-        g_ble_authenticated = false;
-        notify_status();
-        Serial.println("[BLE] Dynamic code authentication failed.");
-    }
-
-    // 处理完整的 RPC 指令请求
-    String rpc_request;
-    {
-        std::lock_guard<std::mutex> lock(g_ble_rpc_mutex);
-        if (g_evt_rpc_ready) {
-            rpc_request = g_ble_rpc_pending;
-            g_ble_rpc_pending = "";
-            g_evt_rpc_ready = false;
-        }
-    }
-    if (rpc_request.length() > 0) process_rpc_request(rpc_request);
-
-    // ===============================================
-    // 常规主循环更新逻辑
-    // ===============================================
     if (g_wifi_state == WiFiState::CONNECTED) {
         g_wifi_rssi = WiFi.RSSI();
-    }
-
-    const uint32_t now_ms = millis();
-
-    if (g_wifi_attempt_active && (now_ms - g_wifi_attempt_started_at_ms) >= WIFI_CONNECT_TIMEOUT_MS) {
-        handle_wifi_attempt_failure("timeout");
-    } else if (!g_wifi_retry_suspended && !g_wifi_attempt_active &&
-               g_wifi_next_retry_at_ms != 0 && now_ms >= g_wifi_next_retry_at_ms) {
-        begin_wifi_connect_attempt(false);
-    }
-
-    if (g_ble_enabled && !g_ble_authenticated && g_ble_idle_since_ms != 0 && (now_ms - g_ble_idle_since_ms) >= BLE_IDLE_TIMEOUT_MS) {
-        disable_ble();
     }
 
     refresh_status_icons();
 }
 
-bool connectivity_manager_set_ble_enabled(bool enable, bool show_popup) {
+bool connectivity_manager_set_softap_enabled(bool enable, bool show_popup) {
     if (!g_manager_initialized) {
         connectivity_manager_init();
     }
-
     if (enable) {
-        if (g_ble_enabled) {
-            if (show_popup) {
-                show_ble_popup("Manual BLE provisioning is active.");
-            } else {
-                hide_ble_popup();
-            }
-            notify_status();
-            return true;
-        }
-
-        enable_ble(show_popup ? "Manual BLE provisioning is active." : nullptr, show_popup);
-        return true;
+        start_softap_internal(true, show_popup);
+    } else {
+        stop_softap_internal();
     }
-
-    if (!g_ble_enabled) {
-        hide_ble_popup();
-        notify_status();
-        return true;
-    }
-
-    disable_ble();
     return true;
 }
 
-bool connectivity_manager_is_ble_enabled() {
-    return g_ble_enabled;
+bool connectivity_manager_is_softap_enabled() {
+    return g_softap_enabled;
 }
 
-const char *connectivity_manager_get_ble_auth_code() {
-    return g_ble_auth_code;
+const char *connectivity_manager_get_softap_ssid() {
+    configure_softap_credentials();
+    return g_softap_ssid;
 }
 
-const char *connectivity_manager_get_ble_device_name() {
-    if (g_ble_device_name[0] == '\0') {
-        build_ble_device_name();
-    }
-    return g_ble_device_name;
+const char *connectivity_manager_get_softap_password() {
+    return SOFTAP_PASSWORD;
 }
 
-void connectivity_manager_hide_ble_popup() {
-    hide_ble_popup();
+const char *connectivity_manager_get_softap_ip() {
+    return SOFTAP_IP_STR;
 }
 
-bool connectivity_manager_is_ble_popup_visible() {
-    return g_ble_popup_visible;
+void connectivity_manager_hide_setup_popup() {
+    hide_setup_popup();
+}
+
+bool connectivity_manager_is_setup_popup_visible() {
+    return g_setup_popup_visible;
 }

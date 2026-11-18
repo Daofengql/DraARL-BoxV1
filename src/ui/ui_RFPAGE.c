@@ -10,7 +10,6 @@ lv_obj_t * ui_header2 = NULL;
 lv_obj_t * ui_logo2 = NULL;
 lv_obj_t * ui_title1 = NULL;
 lv_obj_t * ui_wifistat1 = NULL;
-lv_obj_t * ui_bluestat1 = NULL;
 lv_obj_t * ui_hasNewUpdate1 = NULL;
 
 lv_obj_t *ui_rfModule = NULL;
@@ -20,7 +19,7 @@ lv_obj_t *ui_rfRx = NULL;
 void ui_RFPAGE_screen_init(void)
 {
     ui_RFPAGE = ui_screen_create();
-    ui_make_header(ui_RFPAGE, "射频", &ui_header2, &ui_logo2, &ui_title1, &ui_wifistat1, &ui_bluestat1, &ui_hasNewUpdate1);
+    ui_make_header(ui_RFPAGE, "射频", &ui_header2, &ui_logo2, &ui_title1, &ui_wifistat1, &ui_hasNewUpdate1);
     ui_PWP = ui_panel_create(ui_RFPAGE, 8, 38, 304, 58);
     ui_PWL = ui_text(ui_PWP, "功率", 12, 20, 100, &ui_font_system20, UI_TEXT);
     ui_PWN = ui_text(ui_PWP, "高", 202, 22, 40, &ui_font_system, UI_ACCENT);
@@ -52,7 +51,6 @@ void ui_RFPAGE_screen_destroy(void)
     ui_logo2 = NULL;
     ui_title1 = NULL;
     ui_wifistat1 = NULL;
-    ui_bluestat1 = NULL;
     ui_hasNewUpdate1 = NULL;
 
 }

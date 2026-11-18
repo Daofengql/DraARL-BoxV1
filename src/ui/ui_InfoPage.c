@@ -13,14 +13,13 @@ lv_obj_t * ui_header4 = NULL;
 lv_obj_t * ui_logo4 = NULL;
 lv_obj_t * ui_title3 = NULL;
 lv_obj_t * ui_wifistat3 = NULL;
-lv_obj_t * ui_bluestat3 = NULL;
 lv_obj_t * ui_hasNewUpdate3 = NULL;
 
 
 void ui_InfoPage_screen_init(void)
 {
     ui_InfoPage = ui_screen_create();
-    ui_make_header(ui_InfoPage, "关于", &ui_header4, &ui_logo4, &ui_title3, &ui_wifistat3, &ui_bluestat3, &ui_hasNewUpdate3);
+    ui_make_header(ui_InfoPage, "关于", &ui_header4, &ui_logo4, &ui_title3, &ui_wifistat3, &ui_hasNewUpdate3);
     ui_InfoP1 = ui_panel_create(ui_InfoPage, 8, 38, 304, 174);
     lv_obj_add_flag(ui_InfoP1, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_scroll_dir(ui_InfoP1, LV_DIR_VER);
@@ -61,7 +60,6 @@ void ui_InfoPage_screen_destroy(void)
     ui_logo4 = NULL;
     ui_title3 = NULL;
     ui_wifistat3 = NULL;
-    ui_bluestat3 = NULL;
     ui_hasNewUpdate3 = NULL;
 
 }

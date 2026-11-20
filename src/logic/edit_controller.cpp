@@ -2027,7 +2027,7 @@ bool edit_controller_set_radio_config(const device_config::RadioConfig &config, 
         return false;
     }
 
-    // Incoming server/BLE configuration replaces a local draft. Do not let a
+    // Incoming server configuration replaces a local draft. Do not let a
     // later KEY0 cancellation restore the snapshot from before that update.
     if (edit_mode != EditMode::NONE) {
         cancel_field_edit();

@@ -37,6 +37,8 @@ constexpr uint32_t STARTUP_STEP_INTERVAL_MS = 350;
 constexpr uint32_t CLOCK_REFRESH_INTERVAL_MS = 1000;
 constexpr uint32_t INPUT_RESUME_AFTER_PTT_MS = 500;
 constexpr uint32_t OTA_CHECK_INTERVAL_MS = 3600000;  // 1小时检查一次
+// HTTPS checks include TLS entropy/handshake work and configuration buffers.
+constexpr uint32_t OTA_CHECK_TASK_STACK_BYTES = 16384;
 constexpr size_t STARTUP_STEP_COUNT = 6;
 
 enum class AppState {
@@ -136,6 +138,9 @@ void ota_check_task_entry(void *param) {
 
     ota_update::FirmwareInfo info = {};
     const bool success = ota_update::check_for_update(info);
+    Serial.printf("[OTA] Check finished: ok=%d stack_free_min=%u bytes\n",
+                  success ? 1 : 0,
+                  static_cast<unsigned int>(uxTaskGetStackHighWaterMark(nullptr)));
 
     portENTER_CRITICAL(&ota_check_lock);
     ota_check_result_info = info;
@@ -159,7 +164,7 @@ bool schedule_ota_check(uint32_t now_ms, const char *tag) {
     BaseType_t task_ok = xTaskCreatePinnedToCore(
         ota_check_task_entry,
         "ota_check",
-        8192,
+        OTA_CHECK_TASK_STACK_BYTES,
         nullptr,
         1,
         &ota_check_task_handle,
@@ -440,6 +445,10 @@ void enter_main_screen() {
 
     lv_disp_load_scr(ui_main);
     edit_controller_on_enter_main_screen();
+#if defined(BOXV1_TEST_SETUP_AP) && BOXV1_TEST_SETUP_AP
+    connectivity_manager_set_softap_enabled(true, false);
+    Serial.println("[TEST] Provisioning hotspot kept open for bare-board testing.");
+#endif
     connectivity_manager_on_main_screen_enter();
     net_audio_link_on_main_screen_enter();
 
@@ -610,6 +619,10 @@ void app_logic_init() {
     local_input_gate_state = LocalInputGateState::READY;
     local_input_resume_at_ms = 0;
     auto_start_enabled = device_config::load_auto_start_enabled();
+#if defined(BOXV1_TEST_AUTO_START) && BOXV1_TEST_AUTO_START
+    auto_start_enabled = true;
+    Serial.println("[TEST] Auto-start forced by build flag; NVS setting is not modified.");
+#endif
     device_config::set_defaults(ota_config_cache);
     ota_check_task_handle = nullptr;
     ota_check_result_ready = false;

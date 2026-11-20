@@ -166,24 +166,19 @@
         <section class="panel" aria-labelledby="saved-title">
           <div class="panel-head"><div class="panel-heading"><h2 id="saved-title">已保存</h2><span class="count" id="profile-count">0 / 8</span></div><span class="section-id">AUTO CONNECT</span></div>
           <div id="profiles"><div class="empty">正在读取保存列表…</div></div>
-          <p class="panel-foot">自动优先连接信号更强的已保存网络；列表顺序作为补充尝试顺序。</p>
+          <p class="panel-foot">按保存顺序自动连接；失败后依次尝试后面的已保存网络。</p>
         </section>
       </div>
       <div class="settings">
         <details id="advanced">
-          <summary><span class="summary-copy"><strong>更多设置</strong><small>服务器、呼号、认证信息</small></span></summary>
+          <summary><span class="summary-copy"><strong>更多设置</strong><small>HTTP API 地址</small></span></summary>
           <div class="settings-body">
             <form id="advanced-form">
               <div class="form-grid">
                 <div class="field full"><label for="api-url">HTTP API 地址</label><input id="api-url" name="api_url" type="url" required placeholder="https://ptt.4l2.cn" autocomplete="url" spellcheck="false"></div>
-                <div class="field"><label for="callsign">呼号 (Callsign)</label><input id="callsign" name="callsign" placeholder="如 BI4XYZ" autocomplete="off" spellcheck="false"></div>
-                <div class="field"><label for="node-ssid">SSID 编号 (0-254)</label><input id="node-ssid" name="node_ssid" type="number" min="0" max="254" placeholder="0"></div>
-                <div class="field"><label for="dmr-id">DMR ID</label><input id="dmr-id" name="dmr_id" type="number" placeholder="460xxxx"></div>
-                <div class="field"><label for="account">服务器账号</label><input id="account" name="account" autocomplete="off" spellcheck="false"></div>
-                <div class="field"><label for="device-password">设备认证密码</label><input id="device-password" name="device_password" type="password" autocomplete="new-password"></div>
               </div>
               <p class="error-text" id="advanced-error" role="alert"></p>
-              <div class="button-row"><button class="button primary" type="submit" id="save-advanced">保存设置</button><span class="hint">只保存你修改的项目。</span></div>
+              <div class="button-row"><button class="button primary" type="submit" id="save-advanced">保存设置</button><span class="hint">其他设备信息在绑定后自动获取。</span></div>
             </form>
           </div>
         </details>
@@ -298,12 +293,9 @@
     }
     function renderStatus(value) {
       state = value;
-      for (const [id, key] of [['wifi-enabled', 'wifi_enabled'], ['cellular-enabled', 'cellular_enabled']]) {
-        if (!dirty.has(id)) $(id).checked = !!value.config[key];
-      }
       if (value.restarting) {
         rebooting = true;
-        feedback('网络设置已保存，设备正在重启。请重新连接；重新开启 Wi-Fi 可使用 OLED 的 SYSTEM → NETWORK → WiFi → ENABLE。');
+        feedback('设备正在重启，请稍后重新连接。');
       }
       const connected = value.wifi_connected;
       $('current-ssid').textContent = connected ? value.wifi_ssid : '等待连接 Wi-Fi';
@@ -311,15 +303,8 @@
       $('connection-state').textContent = connected ? '已连接' : '未连接';
       $('connection-state').className = 'badge ' + (connected ? 'online' : 'waiting');
       renderProfiles(value.profiles || []);
-      for (const [id, key] of [
-        ['api-url', 'api_url'],
-        ['callsign', 'callsign'],
-        ['node-ssid', 'node_ssid'],
-        ['dmr-id', 'dmr_id'],
-        ['account', 'account'],
-        ['device-password', 'device_password']
-      ]) {
-        if (!dirty.has(id)) $(id).value = value.config[key] !== undefined ? value.config[key] : '';
+      if (!dirty.has('api-url')) {
+        $('api-url').value = value.config.api_url || '';
       }
     }
     async function refresh() {
@@ -332,18 +317,10 @@
       if (index < 0) throw new Error('保存列表已改变，请刷新后重试');
       return index;
     }
-    async function enableWifi() {
-      if (!state.config.wifi_enabled) {
-        renderStatus(await api('config', 'POST', {wifi_enabled: true}));
-        return false;
-      }
-      return true;
-    }
     function connectProfile(ssid) {
       perform('正在连接 ' + ssid + '…', async () => {
-        if (!await enableWifi()) return;
         renderStatus(await api('profiles/' + profileIndex(ssid) + '/connect', 'POST'));
-        feedback('正在连接 ' + ssid + '，成功后约 10 秒自动关闭配网热点。');
+        feedback('正在连接 ' + ssid + '；自动开启的热点会在成功后约 10 秒关闭。');
       });
     }
     function moveProfile(ssid, direction) {
@@ -410,28 +387,17 @@
       perform('正在保存并连接…', async () => {
         renderStatus(await api('profiles', 'POST', {ssid, password}));
         $('network-dialog').close();
-        if (!await enableWifi()) return;
         renderStatus(await api('profiles/' + profileIndex(ssid) + '/connect', 'POST'));
-        feedback('已保存 ' + ssid + '，正在连接；成功后约 10 秒自动关闭配网热点。');
+        feedback('已保存 ' + ssid + '，正在连接；自动开启的热点会在成功后约 10 秒关闭。');
       }, 'profile-error');
     });
     $('advanced-form').addEventListener('input', event => {
-      const input = event.target;
-      dirty.add(input.id);
-      if (input.type === 'checkbox' && input.checked) {
-        const other = $(input.id === 'wifi-enabled' ? 'cellular-enabled' : 'wifi-enabled');
-        other.checked = false;
-        dirty.add(other.id);
-      }
+      dirty.add(event.target.id);
     });
     $('advanced-form').addEventListener('submit', event => {
       event.preventDefault();
-      const payload = {};
-      for (const input of $('advanced-form').querySelectorAll('input,select')) {
-        if (!dirty.has(input.id)) continue;
-        payload[input.name] = input.type === 'number' ? Number(input.value) : input.value;
-      }
-      if (!Object.keys(payload).length) { feedback('没有需要保存的修改。'); return; }
+      if (!dirty.has('api-url')) { feedback('没有需要保存的修改。'); return; }
+      const payload = {api_url: $('api-url').value};
       const save = async () => {
         const response = await api('config', 'POST', payload);
         dirty.clear();
@@ -440,7 +406,7 @@
       };
       perform('正在保存设置…', save, 'advanced-error');
     });
-        $('reboot-device').addEventListener('click', () => askConfirm('重启设备？', '设备将重新启动并尝试连接已保存的 Wi-Fi。', async () => {
+    $('reboot-device').addEventListener('click', () => askConfirm('重启设备？', '设备将重新启动并尝试连接已保存的 Wi-Fi。', async () => {
       await api('reboot', 'POST'); feedback('设备正在重启，请稍后重新连接。');
     }));
     $('factory-reset').addEventListener('click', () => askConfirm('恢复出厂设置？', '所有 Wi-Fi、服务器、绑定和本地设置都会清除，设备随后重启。', async () => {

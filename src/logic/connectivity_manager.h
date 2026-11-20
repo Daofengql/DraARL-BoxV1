@@ -15,8 +15,4 @@ const char *connectivity_manager_get_softap_ip();
 void connectivity_manager_hide_setup_popup();
 bool connectivity_manager_is_setup_popup_visible();
 
-// Inline compatibility aliases
-inline void connectivity_manager_hide_ble_popup() { connectivity_manager_hide_setup_popup(); }
-inline bool connectivity_manager_is_ble_popup_visible() { return connectivity_manager_is_setup_popup_visible(); }
-
 #endif // CONNECTIVITY_MANAGER_H

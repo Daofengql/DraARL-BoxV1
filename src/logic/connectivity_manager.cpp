@@ -7,6 +7,8 @@
 #include <esp_heap_caps.h>
 #include <esp_http_server.h>
 #include <esp_wifi.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
 #include <lvgl.h>
 
 #include <algorithm>
@@ -28,6 +30,9 @@ constexpr uint32_t WIFI_RETRY_DELAY_MS = 3000;
 constexpr uint32_t WIFI_BACKGROUND_RETRY_DELAY_MS = 15000;
 constexpr uint8_t WIFI_BOOT_FAILURE_LIMIT = 3;
 constexpr uint32_t SETUP_AUTO_CLOSE_DELAY_MS = 10000;
+constexpr uint32_t SOFTAP_STOP_DELAY_MS = 300;
+constexpr uint32_t HTTP_COMMAND_WAIT_MS = 8000;
+constexpr size_t HTTP_COMMAND_ERROR_LEN = 64;
 constexpr uint16_t DNS_PORT = 53;
 
 enum class WiFiState : uint8_t {
@@ -36,6 +41,30 @@ enum class WiFiState : uint8_t {
     CONNECTING = 2,
     CONNECTED = 3,
     FAILED = 4,
+};
+
+// HTTP handlers run in the httpd task. All configuration, Wi-Fi and LVGL work
+// is queued here and executed by connectivity_manager_update() on the main loop.
+enum class HttpCommandType : uint8_t {
+    NONE = 0,
+    STATUS,
+    ADD_PROFILE,
+    DELETE_PROFILE,
+    MOVE_PROFILE,
+    CONNECT_PROFILE,
+    SET_API_URL,
+    STOP_SOFTAP,
+    REBOOT,
+    FACTORY_RESET,
+};
+
+struct HttpCommandRequest {
+    HttpCommandType type = HttpCommandType::NONE;
+    size_t index = 0;
+    int direction = 0;
+    char ssid[device_config::WIFI_SSID_MAX_LEN + 1] = {0};
+    char password[device_config::WIFI_PASSWORD_MAX_LEN + 1] = {0};
+    char api_url[device_config::URL_MAX_LEN + 1] = {0};
 };
 
 device_config::DeviceConfig g_config = {};
@@ -56,9 +85,23 @@ int32_t g_wifi_rssi = 0;
 bool g_softap_enabled = false;
 bool g_softap_manual = false;
 uint32_t g_softap_stop_at_ms = 0;
+uint32_t g_deferred_softap_stop_at_ms = 0;
+volatile bool g_http_stop_pending = false;
 char g_softap_ssid[33] = {0};
 constexpr char SOFTAP_PASSWORD[] = "88888888";
 constexpr char SOFTAP_IP_STR[] = "192.168.4.1";
+
+// Main-loop command handoff
+SemaphoreHandle_t g_command_mutex = nullptr;
+SemaphoreHandle_t g_command_done = nullptr;
+HttpCommandRequest g_pending_command = {};
+volatile bool g_pending_command_ready = false;
+uint32_t g_command_sequence = 0;
+uint32_t g_command_active_sequence = 0;
+uint32_t g_command_done_sequence = 0;
+uint32_t g_active_http_requests = 0;
+String g_command_response;
+char g_command_error[HTTP_COMMAND_ERROR_LEN] = {0};
 
 DNSServer g_dns_server;
 httpd_handle_t g_http_server = nullptr;
@@ -181,6 +224,7 @@ void hide_setup_popup() {
 void begin_wifi_connect_attempt(size_t profile_index);
 void start_softap_internal(bool manual, bool show_popup);
 void stop_softap_internal();
+void request_softap_stop();
 
 // HTTP Response helpers
 esp_err_t send_json(httpd_req_t *req, JsonDocument &doc, int status = 200) {
@@ -264,11 +308,6 @@ void build_status_json(JsonDocument &doc) {
     JsonObject cfg = data["config"].to<JsonObject>();
     cfg["wifi_enabled"] = true;
     cfg["api_url"] = g_config.server.http_api_base_url;
-    cfg["account"] = g_config.server.account;
-    cfg["device_password"] = g_config.server.device_auth_password;
-    cfg["callsign"] = g_config.server.callsign;
-    cfg["node_ssid"] = g_config.server.node_ssid;
-    cfg["dmr_id"] = g_config.server.dmr_id;
 
     JsonObject mem = data["memory"].to<JsonObject>();
     JsonObject mem_int = mem["internal"].to<JsonObject>();
@@ -279,13 +318,228 @@ void build_status_json(JsonDocument &doc) {
     data["uptime_s"] = millis() / 1000;
 }
 
+template <size_t N>
+void copy_command_text(char (&dest)[N], const char *src) {
+    if (!src) {
+        dest[0] = '\0';
+        return;
+    }
+    strncpy(dest, src, N - 1);
+    dest[N - 1] = '\0';
+}
+
+void set_command_error(char (&error)[HTTP_COMMAND_ERROR_LEN], const char *message) {
+    copy_command_text(error, message ? message : "Command failed");
+}
+
+void execute_http_command(const HttpCommandRequest &command,
+                          String &response,
+                          char (&error)[HTTP_COMMAND_ERROR_LEN]) {
+    bool wants_status = true;
+
+    switch (command.type) {
+        case HttpCommandType::STATUS:
+            break;
+        case HttpCommandType::ADD_PROFILE:
+            if (!device_config::add_wifi_profile(g_config, command.ssid, command.password)) {
+                set_command_error(error, "Failed to save profile");
+                return;
+            }
+            begin_wifi_connect_attempt(0);
+            break;
+        case HttpCommandType::DELETE_PROFILE:
+            if (!device_config::delete_wifi_profile(g_config, command.index)) {
+                set_command_error(error, "Failed to delete profile");
+                return;
+            }
+            break;
+        case HttpCommandType::MOVE_PROFILE:
+            if (!device_config::move_wifi_profile(g_config, command.index, command.direction)) {
+                set_command_error(error, "Failed to move profile");
+                return;
+            }
+            break;
+        case HttpCommandType::CONNECT_PROFILE:
+            if (command.index >= g_config.wifi_profile_count) {
+                set_command_error(error, "Profile index out of range");
+                return;
+            }
+            begin_wifi_connect_attempt(command.index);
+            break;
+        case HttpCommandType::SET_API_URL: {
+            // Binding may have updated NVS since the portal's startup snapshot.
+            device_config::DeviceConfig latest_config = {};
+            if (!device_config::load(latest_config)) {
+                set_command_error(error, "Failed to load configuration");
+                return;
+            }
+            copy_command_text(latest_config.server.http_api_base_url, command.api_url);
+            if (!device_config::save_server(latest_config.server)) {
+                set_command_error(error, "Failed to save configuration");
+                return;
+            }
+            g_config.server = latest_config.server;
+            net_audio_link_reload_server_config();
+            break;
+        }
+        case HttpCommandType::STOP_SOFTAP:
+            request_softap_stop();
+            break;
+        case HttpCommandType::REBOOT:
+            g_restarting = true;
+            g_restart_at_ms = millis() + 500;
+            wants_status = false;
+            response = "{\"ok\":true}";
+            break;
+        case HttpCommandType::FACTORY_RESET:
+            if (!device_config::factory_reset()) {
+                set_command_error(error, "Failed to reset configuration");
+                return;
+            }
+            g_restarting = true;
+            g_restart_at_ms = millis() + 500;
+            wants_status = false;
+            response = "{\"ok\":true}";
+            break;
+        case HttpCommandType::NONE:
+        default:
+            set_command_error(error, "Unknown command");
+            return;
+    }
+
+    if (wants_status) {
+        JsonDocument doc;
+        build_status_json(doc);
+        serializeJson(doc, response);
+    }
+}
+
+void process_pending_http_command() {
+    if (!g_pending_command_ready || !g_command_mutex) {
+        return;
+    }
+    if (xSemaphoreTake(g_command_mutex, 0) != pdTRUE) {
+        return;
+    }
+    if (!g_pending_command_ready) {
+        xSemaphoreGive(g_command_mutex);
+        return;
+    }
+
+    HttpCommandRequest command = g_pending_command;
+    const uint32_t sequence = g_command_active_sequence;
+    g_pending_command_ready = false;
+    xSemaphoreGive(g_command_mutex);
+
+    String response;
+    char error[HTTP_COMMAND_ERROR_LEN] = {0};
+    execute_http_command(command, response, error);
+
+    xSemaphoreTake(g_command_mutex, portMAX_DELAY);
+    if (sequence != 0 && g_command_active_sequence == sequence) {
+        g_command_response = response;
+        memcpy(g_command_error, error, sizeof(g_command_error));
+        g_command_done_sequence = sequence;
+        xSemaphoreGive(g_command_done);
+    }
+    xSemaphoreGive(g_command_mutex);
+}
+
+esp_err_t dispatch_http_command(httpd_req_t *req, const HttpCommandRequest &command) {
+    if (!g_command_mutex || !g_command_done) {
+        return send_error(req, "Connectivity manager is not ready", 500);
+    }
+    if (xSemaphoreTake(g_command_mutex, pdMS_TO_TICKS(2000)) != pdTRUE) {
+        return send_error(req, "Device busy, please retry", 500);
+    }
+    if (g_http_stop_pending) {
+        xSemaphoreGive(g_command_mutex);
+        return send_error(req, "Setup hotspot is shutting down");
+    }
+    ++g_active_http_requests;
+
+    xSemaphoreTake(g_command_done, 0);
+    const uint32_t sequence = ++g_command_sequence;
+    g_command_active_sequence = sequence;
+    g_pending_command = command;
+    g_pending_command_ready = true;
+    xSemaphoreGive(g_command_mutex);
+
+    const bool completed =
+        xSemaphoreTake(g_command_done, pdMS_TO_TICKS(HTTP_COMMAND_WAIT_MS)) == pdTRUE;
+
+    xSemaphoreTake(g_command_mutex, portMAX_DELAY);
+    String response;
+    char error[HTTP_COMMAND_ERROR_LEN] = {0};
+    bool result_ready = false;
+    if (g_command_done_sequence == sequence) {
+        response = g_command_response;
+        memcpy(error, g_command_error, sizeof(error));
+        result_ready = true;
+        g_command_response = "";
+        g_command_error[0] = '\0';
+        g_command_done_sequence = 0;
+    }
+    if (g_command_active_sequence == sequence) {
+        g_command_active_sequence = 0;
+    }
+    if (g_pending_command_ready && g_command_active_sequence == 0) {
+        g_pending_command_ready = false;
+    }
+    if (g_active_http_requests > 0) {
+        --g_active_http_requests;
+    }
+    xSemaphoreGive(g_command_mutex);
+
+    if (!completed || !result_ready) {
+        return send_error(req, "Device busy, please retry", 500);
+    }
+    if (error[0] != '\0') {
+        return send_error(req, error);
+    }
+
+    httpd_resp_set_type(req, "application/json; charset=utf-8");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    return httpd_resp_send(req, response.c_str(), response.length());
+}
+
 esp_err_t api_status_handler(httpd_req_t *req) {
-    JsonDocument doc;
-    build_status_json(doc);
-    return send_json(req, doc);
+    HttpCommandRequest command;
+    command.type = HttpCommandType::STATUS;
+    return dispatch_http_command(req, command);
+}
+
+bool begin_http_request() {
+    if (!g_command_mutex) {
+        return false;
+    }
+    if (xSemaphoreTake(g_command_mutex, pdMS_TO_TICKS(2000)) != pdTRUE) {
+        return false;
+    }
+    const bool allowed = !g_http_stop_pending;
+    if (allowed) {
+        ++g_active_http_requests;
+    }
+    xSemaphoreGive(g_command_mutex);
+    return allowed;
+}
+
+void end_http_request() {
+    if (!g_command_mutex) {
+        return;
+    }
+    xSemaphoreTake(g_command_mutex, portMAX_DELAY);
+    if (g_active_http_requests > 0) {
+        --g_active_http_requests;
+    }
+    xSemaphoreGive(g_command_mutex);
 }
 
 esp_err_t api_scan_handler(httpd_req_t *req) {
+    if (!begin_http_request()) {
+        return send_error(req, "Device busy, please retry", 500);
+    }
+
     // Active scan
     int n = WiFi.scanNetworks(false, true);
     JsonDocument doc;
@@ -300,6 +554,8 @@ esp_err_t api_scan_handler(httpd_req_t *req) {
         }
     }
     WiFi.scanDelete();
+
+    end_http_request();
     return send_json(req, doc);
 }
 
@@ -316,16 +572,11 @@ esp_err_t api_add_profile_handler(httpd_req_t *req) {
     const char *pwd = doc["password"] | "";
     if (ssid[0] == '\0') return send_error(req, "SSID cannot be empty");
 
-    if (!device_config::add_wifi_profile(g_config, ssid, pwd)) {
-        return send_error(req, "Failed to save profile");
-    }
-
-    // Attempt connecting to the newly added profile (index 0)
-    begin_wifi_connect_attempt(0);
-
-    JsonDocument reply;
-    build_status_json(reply);
-    return send_json(req, reply);
+    HttpCommandRequest command;
+    command.type = HttpCommandType::ADD_PROFILE;
+    copy_command_text(command.ssid, ssid);
+    copy_command_text(command.password, pwd);
+    return dispatch_http_command(req, command);
 }
 
 bool parse_profile_index(const char *uri, size_t &idx, const char *&action) {
@@ -350,22 +601,17 @@ esp_err_t api_profile_ops_handler(httpd_req_t *req) {
     }
 
     if (req->method == HTTP_DELETE) {
-        if (!device_config::delete_wifi_profile(g_config, index)) {
-            return send_error(req, "Failed to delete profile");
-        }
-        JsonDocument reply;
-        build_status_json(reply);
-        return send_json(req, reply);
+        HttpCommandRequest command;
+        command.type = HttpCommandType::DELETE_PROFILE;
+        command.index = index;
+        return dispatch_http_command(req, command);
     }
 
     if (strcmp(action, "connect") == 0) {
-        if (index >= g_config.wifi_profile_count) {
-            return send_error(req, "Profile index out of range");
-        }
-        begin_wifi_connect_attempt(index);
-        JsonDocument reply;
-        build_status_json(reply);
-        return send_json(req, reply);
+        HttpCommandRequest command;
+        command.type = HttpCommandType::CONNECT_PROFILE;
+        command.index = index;
+        return dispatch_http_command(req, command);
     }
 
     if (strcmp(action, "move") == 0) {
@@ -374,13 +620,12 @@ esp_err_t api_profile_ops_handler(httpd_req_t *req) {
         if (err != ESP_OK) return send_error(req, "Invalid request body");
         JsonDocument doc;
         if (deserializeJson(doc, body)) return send_error(req, "Malformed JSON");
-        int direction = doc["direction"] | 0;
-        if (!device_config::move_wifi_profile(g_config, index, direction)) {
-            return send_error(req, "Failed to move profile");
-        }
-        JsonDocument reply;
-        build_status_json(reply);
-        return send_json(req, reply);
+
+        HttpCommandRequest command;
+        command.type = HttpCommandType::MOVE_PROFILE;
+        command.index = index;
+        command.direction = doc["direction"] | 0;
+        return dispatch_http_command(req, command);
     }
 
     return send_error(req, "Unknown profile operation");
@@ -394,74 +639,37 @@ esp_err_t api_config_handler(httpd_req_t *req) {
     JsonDocument doc;
     if (deserializeJson(doc, body)) return send_error(req, "Malformed JSON");
 
-    if (doc["api_url"].is<const char*>()) {
-        const char *val = doc["api_url"];
-        if (val) {
-            strncpy(g_config.server.http_api_base_url, val, sizeof(g_config.server.http_api_base_url) - 1);
-            g_config.server.http_api_base_url[sizeof(g_config.server.http_api_base_url) - 1] = '\0';
-        }
+    if (!doc["api_url"].is<const char*>()) {
+        return send_error(req, "HTTP API URL is required");
     }
-    if (doc["account"].is<const char*>()) {
-        const char *val = doc["account"];
-        if (val) {
-            strncpy(g_config.server.account, val, sizeof(g_config.server.account) - 1);
-            g_config.server.account[sizeof(g_config.server.account) - 1] = '\0';
-        }
-    }
-    if (doc["device_password"].is<const char*>()) {
-        const char *val = doc["device_password"];
-        if (val) {
-            strncpy(g_config.server.device_auth_password, val, sizeof(g_config.server.device_auth_password) - 1);
-            g_config.server.device_auth_password[sizeof(g_config.server.device_auth_password) - 1] = '\0';
-        }
-    }
-    if (doc["callsign"].is<const char*>()) {
-        const char *val = doc["callsign"];
-        if (val) {
-            strncpy(g_config.server.callsign, val, sizeof(g_config.server.callsign) - 1);
-            g_config.server.callsign[sizeof(g_config.server.callsign) - 1] = '\0';
-        }
-    }
-    if (doc["node_ssid"].is<int>()) {
-        g_config.server.node_ssid = static_cast<uint8_t>(doc["node_ssid"].as<int>());
-    }
-    if (doc["dmr_id"].is<uint32_t>()) {
-        g_config.server.dmr_id = doc["dmr_id"].as<uint32_t>();
+    const char *api_url = doc["api_url"];
+    const size_t api_url_len = strlen(api_url);
+    if (api_url_len == 0 || api_url_len >= device_config::URL_MAX_LEN + 1) {
+        return send_error(req, "Invalid HTTP API URL length");
     }
 
-    if (!device_config::save_server(g_config.server)) {
-        return send_error(req, "Failed to save configuration");
-    }
-
-    net_audio_link_reload_server_config();
-
-    JsonDocument reply;
-    build_status_json(reply);
-    return send_json(req, reply);
+    HttpCommandRequest command;
+    command.type = HttpCommandType::SET_API_URL;
+    copy_command_text(command.api_url, api_url);
+    return dispatch_http_command(req, command);
 }
 
 esp_err_t api_setup_stop_handler(httpd_req_t *req) {
-    stop_softap_internal();
-    JsonDocument reply;
-    build_status_json(reply);
-    return send_json(req, reply);
+    HttpCommandRequest command;
+    command.type = HttpCommandType::STOP_SOFTAP;
+    return dispatch_http_command(req, command);
 }
 
 esp_err_t api_factory_reset_handler(httpd_req_t *req) {
-    device_config::factory_reset();
-    g_restarting = true;
-    g_restart_at_ms = millis() + 500;
-    JsonDocument reply;
-    reply["ok"] = true;
-    return send_json(req, reply);
+    HttpCommandRequest command;
+    command.type = HttpCommandType::FACTORY_RESET;
+    return dispatch_http_command(req, command);
 }
 
 esp_err_t api_reboot_handler(httpd_req_t *req) {
-    g_restarting = true;
-    g_restart_at_ms = millis() + 500;
-    JsonDocument reply;
-    reply["ok"] = true;
-    return send_json(req, reply);
+    HttpCommandRequest command;
+    command.type = HttpCommandType::REBOOT;
+    return dispatch_http_command(req, command);
 }
 
 // HTTP Server Lifecycle
@@ -523,6 +731,9 @@ void stop_http_server() {
 
 void start_softap_internal(bool manual, bool show_popup) {
     configure_softap_credentials();
+    // A stop request that has not run yet must not tear down the newly enabled AP.
+    g_deferred_softap_stop_at_ms = 0;
+    g_http_stop_pending = false;
     if (g_softap_enabled) {
         if (show_popup) show_setup_popup();
         return;
@@ -551,6 +762,15 @@ void start_softap_internal(bool manual, bool show_popup) {
     }
 }
 
+void request_softap_stop() {
+    if (!g_softap_enabled || g_deferred_softap_stop_at_ms != 0) return;
+
+    hide_setup_popup();
+    g_http_stop_pending = true;
+    g_deferred_softap_stop_at_ms = millis() + SOFTAP_STOP_DELAY_MS;
+    Serial.println("[SoftAP] Stop requested; shutting down after response window.");
+}
+
 void stop_softap_internal() {
     if (!g_softap_enabled) return;
 
@@ -567,6 +787,8 @@ void stop_softap_internal() {
     g_softap_enabled = false;
     g_softap_manual = false;
     g_softap_stop_at_ms = 0;
+    g_deferred_softap_stop_at_ms = 0;
+    g_http_stop_pending = false;
 
     Serial.println("[SoftAP] Stopped.");
 }
@@ -670,7 +892,16 @@ void connectivity_manager_init() {
 
     configure_softap_credentials();
 
-    // Wi-Fi Only - No BLE initialized!
+    if (!g_command_mutex) {
+        g_command_mutex = xSemaphoreCreateMutex();
+    }
+    if (!g_command_done) {
+        g_command_done = xSemaphoreCreateBinary();
+    }
+    if (!g_command_mutex || !g_command_done) {
+        Serial.println("[CONNECTIVITY] Failed to create HTTP command synchronization.");
+    }
+
     WiFi.mode(WIFI_STA);
     WiFi.persistent(false);
     WiFi.setAutoReconnect(false);
@@ -685,7 +916,7 @@ void connectivity_manager_init() {
     g_wifi_connected_once = false;
     g_manager_initialized = true;
 
-    Serial.println("[CONNECTIVITY] Initialized with pure Wi-Fi / SoftAP (BLE disabled).");
+    Serial.println("[CONNECTIVITY] Initialized with Wi-Fi STA and SoftAP provisioning.");
 }
 
 void connectivity_manager_on_main_screen_enter() {
@@ -716,6 +947,9 @@ void connectivity_manager_update() {
         Serial.println("[SYSTEM] Rebooting now...");
         ESP.restart();
     }
+
+    // Execute portal commands on the main loop so UI and Wi-Fi state stay single-threaded.
+    process_pending_http_command();
 
     // DNS requests processing for captive portal
     if (g_softap_enabled) {
@@ -759,9 +993,26 @@ void connectivity_manager_update() {
         }
     }
 
+    // Deferred stop requested by the portal or settings; let the HTTP response leave first.
+    if (g_deferred_softap_stop_at_ms != 0 && now_ms >= g_deferred_softap_stop_at_ms) {
+        bool can_stop = false;
+        if (g_command_mutex && xSemaphoreTake(g_command_mutex, 0) == pdTRUE) {
+            can_stop = g_active_http_requests == 0 && !g_pending_command_ready;
+            xSemaphoreGive(g_command_mutex);
+        }
+        if (can_stop) {
+            stop_softap_internal();
+        } else {
+            // A portal request is still being answered; retry on the next loop.
+            g_deferred_softap_stop_at_ms = now_ms + 20;
+        }
+    }
+
     // Auto-close SoftAP after timer expires
-    if (g_softap_enabled && !g_softap_manual && g_softap_stop_at_ms != 0 && now_ms >= g_softap_stop_at_ms) {
-        stop_softap_internal();
+    if (g_softap_enabled && !g_softap_manual && g_softap_stop_at_ms != 0 &&
+        now_ms >= g_softap_stop_at_ms) {
+        g_softap_stop_at_ms = 0;
+        request_softap_stop();
     }
 
     // Wi-Fi Connection Timeout & Retry Scheduler
@@ -784,8 +1035,9 @@ bool connectivity_manager_set_softap_enabled(bool enable, bool show_popup) {
     }
     if (enable) {
         start_softap_internal(true, show_popup);
-    } else {
-        stop_softap_internal();
+    } else if (g_softap_enabled) {
+        // Tear down on the main loop after a short delay so any HTTP reply can leave first.
+        request_softap_stop();
     }
     return true;
 }

@@ -1021,7 +1021,7 @@ void show_bind_popup(const char *code, const char *hint) {
     ensure_bind_popup();
     if (!g_bind_popup) return;
 
-    connectivity_manager_hide_ble_popup();
+    connectivity_manager_hide_setup_popup();
     edit_controller_hide_power_popup();
 
     if (g_bind_code_label) {
